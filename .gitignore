@@ -1,5 +1,6 @@
 node_modules/
 .env
 last_seen_*.json
+known_categories_*.json
 *Scrape-*.csv
 .chrome-profile-*

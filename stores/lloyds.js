@@ -8,7 +8,8 @@ const { launch: launchBrowser, forceClose: closeBrowser } = require('../lib/brow
 const STORE_NAME  = 'Lloyds Pharmacy';
 const ORIGIN      = 'https://lloydspharmacy.com';
 const OFFERS_URL  = 'https://lloydspharmacy.com/pages/great-offers';
-const CACHE_FILE  = path.resolve(__dirname, '..', 'last_seen_lloyds.json');
+const CACHE_FILE      = path.resolve(__dirname, '..', 'last_seen_lloyds.json');
+const CATEGORIES_FILE = path.resolve(__dirname, '..', 'known_categories_lloyds.json');
 
 const EMBED_COLOR = 0x00833E;
 const LOGO_FILE   = path.resolve(__dirname, '..', 'lloyds.png');
@@ -26,9 +27,18 @@ const DISCOUNT_ROLES = [
   { minPct: 30, roleId: '1482058952257568799' },
 ];
 
-// Populated by hand after first run confirms all discovered handles.
-// Bot alerts via monitor webhook if live handles differ from this list.
-const KNOWN_CATEGORIES = [];
+// Persisted to known_categories_lloyds.json — updated automatically after each scan.
+// No manual intervention needed: bot alerts on additions/removals and scans everything it finds.
+function loadKnownCategories() {
+  try {
+    const data = JSON.parse(fs.readFileSync(CATEGORIES_FILE, 'utf8'));
+    return Array.isArray(data) ? data : [];
+  } catch { return []; }
+}
+
+function saveKnownCategories(handles) {
+  fs.writeFileSync(CATEGORIES_FILE, JSON.stringify(handles, null, 2));
+}
 
 // ===== HELPERS =====
 const sleep   = ms => new Promise(r => setTimeout(r, ms));
@@ -100,14 +110,19 @@ async function checkCategories(page) {
     console.log(`[${STORE_NAME}]   ${cat.text}: ${subCats.length} sub-categories`);
   }
 
-  // Compare vs KNOWN_CATEGORIES
-  const knownSet    = new Set(KNOWN_CATEGORIES);
-  const liveSet     = new Set(discoveredHandles.map(d => d.handle));
-  const newCats     = discoveredHandles.filter(d => !knownSet.has(d.handle));
-  const missingCats = KNOWN_CATEGORIES.filter(h => !liveSet.has(h));
+  // Compare vs persisted known categories, then save the current live set
+  const knownHandles = loadKnownCategories();
+  const knownSet     = new Set(knownHandles);
+  const liveHandles  = discoveredHandles.map(d => d.handle);
+  const liveSet      = new Set(liveHandles);
+  const newCats      = discoveredHandles.filter(d => !knownSet.has(d.handle));
+  const missingCats  = knownHandles.filter(h => !liveSet.has(h));
 
   if (newCats.length)     console.log(`[${STORE_NAME}] NEW handles: ${newCats.map(d => d.handle).join(', ')}`);
   if (missingCats.length) console.log(`[${STORE_NAME}] MISSING handles: ${missingCats.join(', ')}`);
+
+  // Always persist the current live set — keeps the file in sync automatically
+  saveKnownCategories(liveHandles);
 
   return { discoveredHandles, newCats, missingCats };
 }
