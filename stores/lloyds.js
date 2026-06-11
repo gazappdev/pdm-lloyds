@@ -361,10 +361,10 @@ async function postToDiscord(p, type) {
 }
 
 // ===== CATEGORY SCRAPER =====
-async function scrapeCategory(handle, cache, seenThisRun) {
+async function scrapeCategory(handle, cache, seenThisRun, coldStart) {
   let totNew = 0, totPriceDrops = 0, pagesScraped = 0, totSeen = 0;
 
-  console.log(`\n[${STORE_NAME}] Scanning: ${handle}`);
+  console.log(`\n[${STORE_NAME}] Scanning: ${handle}${coldStart ? ' (cold start — no posts)' : ''}`);
 
   for (let pageNum = 1; ; pageNum++) {
     if (pageNum > 1) await sleep(500 + randInt(0, 500));
@@ -384,7 +384,7 @@ async function scrapeCategory(handle, cache, seenThisRun) {
       const result = processProduct(p, cache, seenThisRun);
       if (result.type === 'new')       totNew++;
       if (result.type === 'priceDrop') totPriceDrops++;
-      if (result.type === 'new' || result.type === 'priceDrop') {
+      if (!coldStart && (result.type === 'new' || result.type === 'priceDrop')) {
         await postToDiscord(result.product, result.type);
       }
     }
@@ -400,9 +400,12 @@ async function scrapeCategory(handle, cache, seenThisRun) {
 // ===== MAIN SCAN =====
 async function scan() {
   const cache       = loadCache();
+  const coldStart   = Object.keys(cache.items).length === 0;
   const seenThisRun = new Set();
   let totNew = 0, totPriceDrops = 0, totPages = 0;
   const categorySummary = [];
+
+  if (coldStart) console.log(`[${STORE_NAME}] Cold start — cache is empty. Populating silently, no Discord posts this run.`);
 
   async function freshBrowserPage() {
     const b = await launchBrowser();
@@ -433,7 +436,7 @@ async function scan() {
   for (const handle of handles) {
     let result;
     try {
-      result = await scrapeCategory(handle, cache, seenThisRun);
+      result = await scrapeCategory(handle, cache, seenThisRun, coldStart);
     } catch (err) {
       console.error(`[${STORE_NAME}] Error on ${handle}:`, err.message);
       categorySummary.push({ label: handle, new: 0, drops: 0, pages: 0, error: true });
@@ -481,6 +484,7 @@ async function scan() {
     totPriceDrops,
     totRestocks:  0,
     totOos,
+    coldStart,
     categorySummary,
     totalCached,
     newCats:     newCats.map(d => ({ name: d.handle })),

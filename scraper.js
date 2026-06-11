@@ -68,13 +68,14 @@ async function postStoreSummary(stats, scanDurStr, delayMins, nextTimeFull) {
     color:  stats.color || 0x00833E,
     author: { name: `${stats.storeName} PDM — Scan Complete` },
     description: (
+      (stats.coldStart ? `⚠️ **Cold start — cache was empty. No Discord posts this run. Next run will post normally.**\n──────────────────────────────\n` : '') +
       `**📄 Pages scraped:** ${stats.pagesScraped}\n` +
       `**📊 Unique products seen:** ${stats.uniqueSeen}\n` +
-      `**🆕 New deals:** ${stats.totNew}\n` +
+      `**🆕 New deals found:** ${stats.totNew}${stats.coldStart ? ' (cached silently)' : ''}\n` +
       `**📉 Price drops:** ${stats.totPriceDrops}\n` +
       `**❌ OOS:** ${stats.totOos}\n` +
       `**💾 Total cached:** ${stats.totalCached}\n` +
-      `**➡️ Sent to Discord:** ${stats.totNew + stats.totPriceDrops}\n` +
+      `**➡️ Sent to Discord:** ${stats.coldStart ? 0 : stats.totNew + stats.totPriceDrops}\n` +
       `──────────────────────────────\n` +
       (catChanges.length ? catChanges.join('\n') + '\n──────────────────────────────\n' : '') +
       (catLines          ? catLines              + '\n──────────────────────────────\n' : '') +
