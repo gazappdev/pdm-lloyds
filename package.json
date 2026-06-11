@@ -6,12 +6,12 @@
   "main": "scraper.js",
   "scripts": {
     "start": "node scraper.js",
-    "postinstall": "node -e \"try{require('fs').rmSync(require('path').join(process.cwd(),'.cache','puppeteer','chrome'),{recursive:true,force:true})}catch(e){}\" && npx puppeteer browsers install chrome"
+    "postinstall": "node -e \"try{require('fs').rmSync(require('path').join(process.cwd(),'.cache','puppeteer','chrome'),{recursive:true,force:true})}catch(e){}\" && node scripts/install-chrome.js"
   },
   "dependencies": {
     "dotenv": "16.4.5",
     "node-cron": "^3.0.3",
-    "puppeteer": "^22.0.0",
+    "puppeteer-core": "^22.0.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
