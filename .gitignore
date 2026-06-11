@@ -1,0 +1,5 @@
+node_modules/
+.env
+last_seen_*.json
+*Scrape-*.csv
+.chrome-profile-*
