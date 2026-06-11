@@ -16,8 +16,9 @@ const LOGO_FILE   = path.resolve(__dirname, '..', 'lloyds.png');
 const FOOTER_TEXT = 'Powered by Reseller Hub';
 const FOOTER_ICON = 'https://i.imgur.com/aXI4ucP.png';
 
-const PAGE_LOAD_TIMEOUT_MS = 90000;
-const MIN_POST_DELAY_MS    = 1500;
+const PAGE_LOAD_TIMEOUT_MS    = 90000;
+const MIN_POST_DELAY_MS       = 1500;
+const COLD_START_PREVIEW_COUNT = 5;
 
 const BLOCK_RESOURCE_TYPES = new Set(['image', 'font', 'stylesheet', 'media', 'websocket', 'ping']);
 
@@ -361,10 +362,11 @@ async function postToDiscord(p, type) {
 }
 
 // ===== CATEGORY SCRAPER =====
-async function scrapeCategory(handle, cache, seenThisRun, coldStart) {
+// coldStartBudget is a shared { remaining: N } object across all category calls — mutated as preview posts are sent.
+async function scrapeCategory(handle, cache, seenThisRun, coldStart, coldStartBudget) {
   let totNew = 0, totPriceDrops = 0, pagesScraped = 0, totSeen = 0;
 
-  console.log(`\n[${STORE_NAME}] Scanning: ${handle}${coldStart ? ' (cold start — no posts)' : ''}`);
+  console.log(`\n[${STORE_NAME}] Scanning: ${handle}${coldStart ? ` (cold start — ${coldStartBudget.remaining} preview posts remaining)` : ''}`);
 
   for (let pageNum = 1; ; pageNum++) {
     if (pageNum > 1) await sleep(500 + randInt(0, 500));
@@ -384,8 +386,13 @@ async function scrapeCategory(handle, cache, seenThisRun, coldStart) {
       const result = processProduct(p, cache, seenThisRun);
       if (result.type === 'new')       totNew++;
       if (result.type === 'priceDrop') totPriceDrops++;
-      if (!coldStart && (result.type === 'new' || result.type === 'priceDrop')) {
+      const shouldPost = !coldStart
+        ? (result.type === 'new' || result.type === 'priceDrop')
+        : (result.type === 'new' && coldStartBudget.remaining > 0);
+
+      if (shouldPost) {
         await postToDiscord(result.product, result.type);
+        if (coldStart) coldStartBudget.remaining--;
       }
     }
 
@@ -405,7 +412,8 @@ async function scan() {
   let totNew = 0, totPriceDrops = 0, totPages = 0;
   const categorySummary = [];
 
-  if (coldStart) console.log(`[${STORE_NAME}] Cold start — cache is empty. Populating silently, no Discord posts this run.`);
+  const coldStartBudget = { remaining: COLD_START_PREVIEW_COUNT };
+  if (coldStart) console.log(`[${STORE_NAME}] Cold start — cache is empty. Posting first ${COLD_START_PREVIEW_COUNT} deals for verification, then caching the rest silently.`);
 
   async function freshBrowserPage() {
     const b = await launchBrowser();
@@ -436,7 +444,7 @@ async function scan() {
   for (const handle of handles) {
     let result;
     try {
-      result = await scrapeCategory(handle, cache, seenThisRun, coldStart);
+      result = await scrapeCategory(handle, cache, seenThisRun, coldStart, coldStartBudget);
     } catch (err) {
       console.error(`[${STORE_NAME}] Error on ${handle}:`, err.message);
       categorySummary.push({ label: handle, new: 0, drops: 0, pages: 0, error: true });
@@ -485,6 +493,7 @@ async function scan() {
     totRestocks:  0,
     totOos,
     coldStart,
+    coldStartPreviewSent: coldStart ? COLD_START_PREVIEW_COUNT - coldStartBudget.remaining : 0,
     categorySummary,
     totalCached,
     newCats:     newCats.map(d => ({ name: d.handle })),
