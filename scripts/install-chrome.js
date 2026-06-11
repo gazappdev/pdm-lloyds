@@ -1,24 +1,46 @@
 'use strict';
 
-const { install, detectBrowserPlatform, resolveBuildId } = require('@puppeteer/browsers');
+// chrome-headless-shell is ~40MB binary vs ~200MB for full chrome.
+// Full chrome extraction runs out of disk space on Bisect containers.
+const { install, detectBrowserPlatform } = require('@puppeteer/browsers');
 const path = require('path');
+const fs   = require('fs');
 
+const BROWSER  = 'chrome-headless-shell';
+const buildId  = require('puppeteer-core/package.json').puppeteer['chrome-headless-shell'];
 const cacheDir = path.join(process.cwd(), '.cache', 'puppeteer');
 
 (async () => {
   const platform = detectBrowserPlatform();
-  const buildId  = await resolveBuildId('chrome', platform, 'stable');
-  console.log(`Installing Chrome ${buildId} to ${cacheDir} ...`);
-  await install({
-    browser: 'chrome',
+  console.log(`Installing ${BROWSER} ${buildId} (${platform}) to ${cacheDir} ...`);
+
+  const result = await install({
+    browser: BROWSER,
     buildId,
     cacheDir,
     downloadProgressCallback(downloaded, total) {
-      if (total > 0) process.stdout.write(`\rDownloading Chrome: ${Math.round(downloaded / total * 100)}%`);
+      if (total > 0) process.stdout.write(`\rDownloading: ${Math.round(downloaded / total * 100)}%`);
     },
   });
-  console.log('\nChrome installed successfully.');
+
+  process.stdout.write('\n');
+  console.log('executablePath:', result.executablePath);
+
+  if (fs.existsSync(result.executablePath)) {
+    console.log(`${BROWSER} binary verified.`);
+  } else {
+    console.error(`ERROR: ${BROWSER} binary missing after install.`);
+    const buildDir = path.dirname(result.executablePath);
+    const parent   = path.dirname(buildDir);
+    if (fs.existsSync(parent)) {
+      console.error('Contents of', parent + ':', fs.readdirSync(parent).join(', '));
+    }
+    if (fs.existsSync(buildDir)) {
+      console.error('Contents of', buildDir + ':', fs.readdirSync(buildDir).join(', '));
+    }
+    process.exit(1);
+  }
 })().catch(err => {
-  console.error('Chrome install failed:', err.message);
+  console.error(`${BROWSER} install failed:`, err.message);
   process.exit(1);
 });
