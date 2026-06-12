@@ -5,14 +5,10 @@
   "type": "commonjs",
   "main": "scraper.js",
   "scripts": {
-    "start": "node scraper.js",
-    "postinstall": "node -e \"const p=require('path'),f=require('fs');['chrome','chrome-headless-shell'].forEach(b=>{try{f.rmSync(p.join(process.cwd(),'.cache','puppeteer',b),{recursive:true,force:true})}catch(e){}})\" && node scripts/install-chrome.js"
+    "start": "node scraper.js"
   },
   "dependencies": {
     "dotenv": "16.4.5",
-    "node-cron": "^3.0.3",
-    "puppeteer-core": "^22.0.0",
-    "puppeteer-extra": "^3.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
+    "node-cron": "^3.0.3"
   }
 }

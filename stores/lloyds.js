@@ -2,7 +2,6 @@
 
 const fs   = require('fs');
 const path = require('path');
-const { launch: launchBrowser, forceClose: closeBrowser } = require('../lib/browser');
 
 // ===== CONFIG =====
 const STORE_NAME  = 'Lloyds Pharmacy';
@@ -16,11 +15,8 @@ const LOGO_FILE   = path.resolve(__dirname, '..', 'lloyds.png');
 const FOOTER_TEXT = 'Powered by Reseller Hub';
 const FOOTER_ICON = 'https://i.imgur.com/aXI4ucP.png';
 
-const PAGE_LOAD_TIMEOUT_MS    = 90000;
-const MIN_POST_DELAY_MS       = 1500;
+const MIN_POST_DELAY_MS        = 1500;
 const COLD_START_PREVIEW_COUNT = 5;
-
-const BLOCK_RESOURCE_TYPES = new Set(['image', 'font', 'stylesheet', 'media', 'websocket', 'ping']);
 
 const DISCOUNT_ROLES = [
   { minPct: 75, roleId: '1482059276397842513' },
@@ -28,8 +24,13 @@ const DISCOUNT_ROLES = [
   { minPct: 30, roleId: '1482058952257568799' },
 ];
 
-// Persisted to known_categories_lloyds.json — updated automatically after each scan.
-// No manual intervention needed: bot alerts on additions/removals and scans everything it finds.
+const FETCH_HEADERS = {
+  'Accept':          'text/html,application/xhtml+xml,*/*;q=0.9',
+  'Accept-Language': 'en-GB,en;q=0.9',
+  'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+};
+
+// ===== CATEGORY PERSISTENCE =====
 function loadKnownCategories() {
   try {
     const data = JSON.parse(fs.readFileSync(CATEGORIES_FILE, 'utf8'));
@@ -63,55 +64,79 @@ function saveCache(cache) {
 }
 
 // ===== CATEGORY DISCOVERY =====
-async function checkCategories(page) {
+// Pure HTTP — Shopify pages are server-side rendered; no browser needed.
+async function checkCategories() {
   console.log(`[${STORE_NAME}] Discovering categories from ${OFFERS_URL}...`);
-  await page.goto(OFFERS_URL, { waitUntil: 'domcontentloaded', timeout: PAGE_LOAD_TIMEOUT_MS });
-  await sleep(2000 + randInt(0, 1000));
 
-  // Tier 1: extract main category page links (/pages/*)
-  const categoryPageLinks = await page.evaluate((offersUrl) => {
-    const seen = new Set();
-    return Array.from(document.querySelectorAll('a[href*="/pages/"]'))
-      .map(a => ({ text: a.textContent.trim(), href: a.href }))
-      .filter(a => {
-        if (!a.href || a.href === offersUrl)              return false;
-        if (!a.href.match(/\/pages\/[^/?#]+$/))           return false;
-        if (seen.has(a.href))                             return false;
-        seen.add(a.href);
-        return true;
-      });
-  }, OFFERS_URL);
-
-  console.log(`[${STORE_NAME}] Found ${categoryPageLinks.length} main category pages`);
-
-  // Tier 2: visit each category page and extract sub-category collection handles
-  const discoveredHandles = [];
-  for (const cat of categoryPageLinks) {
-    await page.goto(cat.href, { waitUntil: 'domcontentloaded', timeout: PAGE_LOAD_TIMEOUT_MS });
-    await sleep(1500 + randInt(0, 500));
-
-    const subCats = await page.evaluate(() => {
-      const seen = new Set();
-      return Array.from(document.querySelectorAll('a[href*="/collections/"]'))
-        .map(a => {
-          const m = a.href.match(/\/collections\/([^/?#]+)/);
-          return m ? { handle: m[1], text: a.textContent.trim() } : null;
-        })
-        .filter(item => {
-          if (!item)               return false;
-          if (seen.has(item.handle)) return false;
-          seen.add(item.handle);
-          return true;
-        });
-    });
-
-    for (const sub of subCats) {
-      discoveredHandles.push({ handle: sub.handle, parentPage: cat.text });
-    }
-    console.log(`[${STORE_NAME}]   ${cat.text}: ${subCats.length} sub-categories`);
+  let offersHtml;
+  try {
+    const res = await fetch(OFFERS_URL, { headers: FETCH_HEADERS });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    offersHtml = await res.text();
+  } catch (err) {
+    console.warn(`[${STORE_NAME}] Failed to fetch offers page: ${err.message} — using cached categories`);
+    const known = loadKnownCategories();
+    return {
+      discoveredHandles: known.map(h => ({ handle: h, parentPage: 'cached' })),
+      newCats: [],
+      missingCats: [],
+    };
   }
 
-  // Compare vs persisted known categories, then save the current live set
+  // Tier 1: extract /pages/* links (sub-category landing pages)
+  const pageLinks  = new Set();
+  const pageLinkRe = /href="(\/pages\/[^"?#]+)"/g;
+  let match;
+  while ((match = pageLinkRe.exec(offersHtml)) !== null) {
+    const href = match[1];
+    if (href === '/pages/great-offers') continue;
+    if (/\/(legal|cookie|privacy|terms|accessibility|search)/i.test(href)) continue;
+    pageLinks.add(href);
+  }
+  console.log(`[${STORE_NAME}] Found ${pageLinks.size} category pages`);
+
+  // Tier 2: fetch each category page and extract /collections/* handles
+  const discoveredHandles = [];
+  const allHandlesSeen    = new Set();
+
+  for (const pagePath of pageLinks) {
+    await sleep(800 + randInt(0, 400));
+    try {
+      const res = await fetch(`${ORIGIN}${pagePath}`, { headers: FETCH_HEADERS });
+      if (!res.ok) { console.warn(`[${STORE_NAME}]   ${pagePath}: HTTP ${res.status}`); continue; }
+      const html      = await res.text();
+      const handleRe  = /href="\/collections\/([^"?#/]+)/g;
+      const pageFound = [];
+      let m;
+      while ((m = handleRe.exec(html)) !== null) {
+        const handle = m[1];
+        if (handle === 'all') continue;
+        if (!allHandlesSeen.has(handle)) {
+          allHandlesSeen.add(handle);
+          discoveredHandles.push({ handle, parentPage: pagePath });
+          pageFound.push(handle);
+        }
+      }
+      console.log(`[${STORE_NAME}]   ${pagePath}: ${pageFound.length} collections`);
+    } catch (err) {
+      console.warn(`[${STORE_NAME}]   ${pagePath}: error — ${err.message}`);
+    }
+  }
+
+  // Fall back to cached categories if discovery produced nothing
+  if (discoveredHandles.length === 0) {
+    const known = loadKnownCategories();
+    if (known.length > 0) {
+      console.warn(`[${STORE_NAME}] Discovery returned 0 results — using ${known.length} cached categories`);
+      return {
+        discoveredHandles: known.map(h => ({ handle: h, parentPage: 'cached' })),
+        newCats: [],
+        missingCats: [],
+      };
+    }
+  }
+
+  // Compare vs persisted and save
   const knownHandles = loadKnownCategories();
   const knownSet     = new Set(knownHandles);
   const liveHandles  = discoveredHandles.map(d => d.handle);
@@ -122,9 +147,7 @@ async function checkCategories(page) {
   if (newCats.length)     console.log(`[${STORE_NAME}] NEW handles: ${newCats.map(d => d.handle).join(', ')}`);
   if (missingCats.length) console.log(`[${STORE_NAME}] MISSING handles: ${missingCats.join(', ')}`);
 
-  // Always persist the current live set — keeps the file in sync automatically
   saveKnownCategories(liveHandles);
-
   return { discoveredHandles, newCats, missingCats };
 }
 
@@ -152,8 +175,6 @@ async function fetchCollectionPage(handle, pageNum) {
 }
 
 // ===== PRODUCT PARSER =====
-// Shopify returns prices as strings — cast to Number.
-// EAN comes from variants[0].barcode — no secondary API call needed.
 function parseProduct(raw, collectionHandle) {
   if (!raw || !raw.id) return null;
   const variant = (raw.variants || [])[0];
@@ -189,8 +210,6 @@ function parseProduct(raw, collectionHandle) {
 }
 
 // ===== CHANGE DETECTION =====
-// Returns { type: 'new'|'priceDrop'|null, product }
-// Restocks are silent — cache updated, no Discord post.
 function processProduct(p, cache, seenThisRun) {
   seenThisRun.add(p.id);
   const prev = cache.items[p.id];
@@ -203,12 +222,10 @@ function processProduct(p, cache, seenThisRun) {
   }
 
   if (prev.status === 'oos') {
-    // Restock — silent cache update only
     cache.items[p.id] = { ...prev, ...p, ean: prev.ean || p.ean, status: 'active' };
     return { type: null };
   }
 
-  // Active — refresh display fields, preserve cached EAN
   cache.items[p.id].name     = p.name;
   cache.items[p.id].imageUrl = p.imageUrl;
   cache.items[p.id].brand    = p.brand;
@@ -362,7 +379,6 @@ async function postToDiscord(p, type) {
 }
 
 // ===== CATEGORY SCRAPER =====
-// coldStartBudget is a shared { remaining: N } object across all category calls — mutated as preview posts are sent.
 async function scrapeCategory(handle, cache, seenThisRun, coldStart, coldStartBudget) {
   let totNew = 0, totPriceDrops = 0, pagesScraped = 0, totSeen = 0;
 
@@ -397,8 +413,7 @@ async function scrapeCategory(handle, cache, seenThisRun, coldStart, coldStartBu
     }
 
     saveCache(cache);
-
-    if (products.length < 250) break; // last page — fewer than limit means no more
+    if (products.length < 250) break;
   }
 
   return { totNew, totPriceDrops, pagesScraped, seen: totSeen };
@@ -415,32 +430,12 @@ async function scan() {
   const coldStartBudget = { remaining: COLD_START_PREVIEW_COUNT };
   if (coldStart) console.log(`[${STORE_NAME}] Cold start — cache is empty. Posting first ${COLD_START_PREVIEW_COUNT} deals for verification, then caching the rest silently.`);
 
-  async function freshBrowserPage() {
-    const b = await launchBrowser();
-    const p = await b.newPage();
-    await p.setExtraHTTPHeaders({ 'Accept-Language': 'en-GB,en;q=0.9' });
-    await p.setRequestInterception(true);
-    p.on('request', req => {
-      BLOCK_RESOURCE_TYPES.has(req.resourceType()) ? req.abort() : req.continue();
-    });
-    return { browser: b, page: p };
-  }
-
-  // 1. Category discovery — dedicated short-lived browser
-  let discoveredHandles, newCats, missingCats;
-  {
-    const { browser: b, page } = await freshBrowserPage();
-    try {
-      ({ discoveredHandles, newCats, missingCats } = await checkCategories(page));
-    } finally {
-      await closeBrowser(b);
-    }
-  }
-
+  // 1. Category discovery — pure HTTP fetch, no browser
+  const { discoveredHandles, newCats, missingCats } = await checkCategories();
   const handles = discoveredHandles.map(d => d.handle);
   console.log(`[${STORE_NAME}] Scanning ${handles.length} collections via Shopify API...`);
 
-  // 2. Scrape each collection — pure HTTP, no browser needed
+  // 2. Scrape each collection
   for (const handle of handles) {
     let result;
     try {
@@ -463,7 +458,7 @@ async function scan() {
     });
   }
 
-  // 3. Mark OOS — active items not seen this run
+  // 3. Mark OOS
   let totOos = 0;
   if (totPages > 0) {
     for (const id of Object.keys(cache.items)) {
