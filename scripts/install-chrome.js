@@ -1,17 +1,17 @@
 'use strict';
 
-// chrome-headless-shell is ~40MB binary vs ~200MB for full chrome.
-// Full chrome extraction runs out of disk space on Bisect containers.
-const { install, detectBrowserPlatform } = require('@puppeteer/browsers');
+// chrome-headless-shell: ~40MB binary vs ~200MB for full chrome.
+// Full chrome extraction exhausts Bisect container disk space.
+const { install, detectBrowserPlatform, resolveBuildId } = require('@puppeteer/browsers');
 const path = require('path');
 const fs   = require('fs');
 
 const BROWSER  = 'chrome-headless-shell';
-const buildId  = require('puppeteer-core/package.json').puppeteer['chrome-headless-shell'];
 const cacheDir = path.join(process.cwd(), '.cache', 'puppeteer');
 
 (async () => {
   const platform = detectBrowserPlatform();
+  const buildId  = await resolveBuildId(BROWSER, platform, 'stable');
   console.log(`Installing ${BROWSER} ${buildId} (${platform}) to ${cacheDir} ...`);
 
   const result = await install({
@@ -32,15 +32,11 @@ const cacheDir = path.join(process.cwd(), '.cache', 'puppeteer');
     console.error(`ERROR: ${BROWSER} binary missing after install.`);
     const buildDir = path.dirname(result.executablePath);
     const parent   = path.dirname(buildDir);
-    if (fs.existsSync(parent)) {
-      console.error('Contents of', parent + ':', fs.readdirSync(parent).join(', '));
-    }
-    if (fs.existsSync(buildDir)) {
-      console.error('Contents of', buildDir + ':', fs.readdirSync(buildDir).join(', '));
-    }
+    if (fs.existsSync(parent)) console.error('Contents of', parent + ':', fs.readdirSync(parent).join(', '));
+    if (fs.existsSync(buildDir)) console.error('Contents of', buildDir + ':', fs.readdirSync(buildDir).join(', '));
     process.exit(1);
   }
 })().catch(err => {
-  console.error(`${BROWSER} install failed:`, err.message);
+  console.error('Install failed:', err.message);
   process.exit(1);
 });
