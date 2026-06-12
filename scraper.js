@@ -89,7 +89,7 @@ async function postStoreSummary(stats, scanDurStr, delayMins, nextTimeFull) {
   if (description.length > 4000) description = description.slice(0, 3990) + '\n*(trimmed)*';
 
   const embed = {
-    color:  stats.color || 0x00833E,
+    color:  stats.color || 0x98BD0D,
     author: { name: `${stats.storeName} PDM — Scan Complete` },
     description,
   };

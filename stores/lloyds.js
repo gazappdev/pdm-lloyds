@@ -10,7 +10,7 @@ const OFFERS_URL  = 'https://lloydspharmacy.com/pages/great-offers';
 const CACHE_FILE      = path.resolve(__dirname, '..', 'last_seen_lloyds.json');
 const CATEGORIES_FILE = path.resolve(__dirname, '..', 'known_categories_lloyds.json');
 
-const EMBED_COLOR = 0x00833E;
+const EMBED_COLOR = 0x98BD0D;
 const LOGO_FILE   = path.resolve(__dirname, '..', 'lloyds.png');
 const FOOTER_TEXT = 'Powered by Reseller Hub';
 const FOOTER_ICON = 'https://i.imgur.com/aXI4ucP.png';
@@ -260,6 +260,41 @@ function processProduct(p, cache, seenThisRun) {
   return { type: null };
 }
 
+// ===== GTIN ENRICHMENT =====
+async function fetchProductGtin(productUrl) {
+  try {
+    const res = await fetch(productUrl, { headers: FETCH_HEADERS });
+    if (!res.ok) return null;
+    const html = await res.text();
+
+    const jsonLdRe = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+    let m;
+    while ((m = jsonLdRe.exec(html)) !== null) {
+      try {
+        const data  = JSON.parse(m[1]);
+        const items = data['@graph'] ? (Array.isArray(data['@graph']) ? data['@graph'] : [data['@graph']]) : [data];
+        for (const item of items) {
+          if (item['@type'] !== 'Product') continue;
+          for (const key of ['gtin13', 'gtin12', 'gtin8', 'gtin14', 'gtin']) {
+            const val = item[key];
+            if (val && /^\d{8,14}$/.test(String(val))) return String(val);
+          }
+          const offers = item.offers ? (Array.isArray(item.offers) ? item.offers : [item.offers]) : [];
+          for (const offer of offers) {
+            for (const key of ['gtin13', 'gtin12', 'gtin8', 'gtin14', 'gtin']) {
+              const val = offer[key];
+              if (val && /^\d{8,14}$/.test(String(val))) return String(val);
+            }
+          }
+        }
+      } catch {}
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // ===== DISCORD HELPERS =====
 let lastWebhookPostAt = 0;
 
@@ -407,6 +442,14 @@ async function scrapeCategory(handle, cache, seenThisRun, coldStart, coldStartBu
         : (result.type === 'new' && coldStartBudget.remaining > 0);
 
       if (shouldPost) {
+        if (!result.product.ean) {
+          await sleep(300 + randInt(0, 200));
+          const gtin = await fetchProductGtin(result.product.productUrl);
+          if (gtin) {
+            result.product.ean = gtin;
+            if (cache.items[result.product.id]) cache.items[result.product.id].ean = gtin;
+          }
+        }
         await postToDiscord(result.product, result.type);
         if (coldStart) coldStartBudget.remaining--;
       }
