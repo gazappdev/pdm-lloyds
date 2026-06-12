@@ -1,7 +1,6 @@
 'use strict';
 
-// chrome-headless-shell: ~40MB binary vs ~200MB for full chrome.
-// Full chrome extraction exhausts Bisect container disk space.
+// chrome-headless-shell: stripped headless-only build, much smaller than full chrome
 const { install, detectBrowserPlatform, resolveBuildId } = require('@puppeteer/browsers');
 const path = require('path');
 const fs   = require('fs');
@@ -24,19 +23,26 @@ const cacheDir = path.join(process.cwd(), '.cache', 'puppeteer');
   });
 
   process.stdout.write('\n');
-  console.log('executablePath:', result.executablePath);
+  console.log(`install() returned executablePath: ${result.executablePath}`);
 
   if (fs.existsSync(result.executablePath)) {
-    console.log(`${BROWSER} binary verified.`);
+    console.log(`VERIFIED: ${BROWSER} binary present.`);
   } else {
-    console.error(`ERROR: ${BROWSER} binary missing after install.`);
+    console.warn(`WARN: binary not found at expected path: ${result.executablePath}`);
+    // List what IS in the build directory so we can see the actual structure
     const buildDir = path.dirname(result.executablePath);
     const parent   = path.dirname(buildDir);
-    if (fs.existsSync(parent)) console.error('Contents of', parent + ':', fs.readdirSync(parent).join(', '));
-    if (fs.existsSync(buildDir)) console.error('Contents of', buildDir + ':', fs.readdirSync(buildDir).join(', '));
-    process.exit(1);
+    if (fs.existsSync(parent)) {
+      console.warn('parent dir contents:', fs.readdirSync(parent).join(', '));
+    }
+    if (fs.existsSync(buildDir)) {
+      console.warn('build dir contents:', fs.readdirSync(buildDir).join(', '));
+    } else {
+      console.warn('build dir does not exist:', buildDir);
+    }
+    // Exit 0 so npm install succeeds — bot may use system Chrome instead
   }
 })().catch(err => {
-  console.error('Install failed:', err.message);
-  process.exit(1);
+  // Non-fatal: log error but let npm install succeed so bot can try system Chrome
+  console.warn(`WARN: ${BROWSER} install failed: ${err.message}`);
 });
