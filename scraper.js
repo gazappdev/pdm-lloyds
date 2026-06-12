@@ -54,34 +54,44 @@ async function postStoreSummary(stats, scanDurStr, delayMins, nextTimeFull) {
   if (stats.newCats?.length)     catChanges.push(`🆕 New categories: ${stats.newCats.map(c => c.name).join(', ')}`);
   if (stats.missingCats?.length) catChanges.push(`❌ Missing categories: ${stats.missingCats.map(c => c.name).join(', ')}`);
 
-  const catLines = (stats.categorySummary || []).map(c => {
-    if (c.error) return '`' + c.label + '` ⚠️ error';
-    const parts = [];
-    if (c.seen  != null)                parts.push(`${c.seen} products`);
-    if (c.pages != null && c.pages > 0) parts.push(`${c.pages}p`);
-    if (c.drops)                        parts.push(`📉 ${c.drops}`);
-    if (c.new)                          parts.push(`🆕 ${c.new}`);
-    return '`' + c.label + '`' + (parts.length ? ' — ' + parts.join('  ') : '');
-  }).join('\n');
+  // Only list categories with activity — listing all quietly-scanned collections
+  // exceeds Discord's 4096-char embed description limit for large stores.
+  const totalCats  = (stats.categorySummary || []).length;
+  const activeCats = (stats.categorySummary || []).filter(c => c.error || c.new || c.drops);
+  let catLines = '';
+  if (activeCats.length > 0) {
+    catLines = activeCats.map(c => {
+      if (c.error) return '`' + c.label + '` ⚠️ error';
+      const parts = [];
+      if (c.drops) parts.push(`📉 ${c.drops}`);
+      if (c.new)   parts.push(`🆕 ${c.new}`);
+      return '`' + c.label + '`' + (parts.length ? ' — ' + parts.join('  ') : '');
+    }).join('\n');
+  }
+
+  let description = (
+    (stats.coldStart ? `⚠️ **Cold start — ${stats.coldStartPreviewSent} preview posts sent for verification. Remaining deals cached silently. Next run posts normally.**\n──────────────────────────────\n` : '') +
+    `**📄 Pages scraped:** ${stats.pagesScraped}\n` +
+    `**📊 Unique products seen:** ${stats.uniqueSeen} across ${totalCats} categories\n` +
+    `**🆕 New deals found:** ${stats.totNew}${stats.coldStart ? ` (${stats.coldStartPreviewSent} posted, rest cached silently)` : ''}\n` +
+    `**📉 Price drops:** ${stats.totPriceDrops}\n` +
+    `**❌ OOS:** ${stats.totOos}\n` +
+    `**💾 Total cached:** ${stats.totalCached}\n` +
+    `**➡️ Sent to Discord:** ${stats.coldStart ? stats.coldStartPreviewSent : stats.totNew + stats.totPriceDrops}\n` +
+    `──────────────────────────────\n` +
+    (catChanges.length ? catChanges.join('\n') + '\n──────────────────────────────\n' : '') +
+    (catLines          ? catLines              + '\n──────────────────────────────\n' : '') +
+    `⏱️ Scan duration: **${scanDurStr}**\n` +
+    `⏳ Next run in **${delayMins}** minutes at **${nextTimeFull}**`
+  );
+
+  // Hard cap at Discord's 4096-char limit
+  if (description.length > 4000) description = description.slice(0, 3990) + '\n*(trimmed)*';
 
   const embed = {
     color:  stats.color || 0x00833E,
     author: { name: `${stats.storeName} PDM — Scan Complete` },
-    description: (
-      (stats.coldStart ? `⚠️ **Cold start — ${stats.coldStartPreviewSent} preview posts sent for verification. Remaining deals cached silently. Next run posts normally.**\n──────────────────────────────\n` : '') +
-      `**📄 Pages scraped:** ${stats.pagesScraped}\n` +
-      `**📊 Unique products seen:** ${stats.uniqueSeen}\n` +
-      `**🆕 New deals found:** ${stats.totNew}${stats.coldStart ? ` (${stats.coldStartPreviewSent} posted, rest cached silently)` : ''}\n` +
-      `**📉 Price drops:** ${stats.totPriceDrops}\n` +
-      `**❌ OOS:** ${stats.totOos}\n` +
-      `**💾 Total cached:** ${stats.totalCached}\n` +
-      `**➡️ Sent to Discord:** ${stats.coldStart ? stats.coldStartPreviewSent : stats.totNew + stats.totPriceDrops}\n` +
-      `──────────────────────────────\n` +
-      (catChanges.length ? catChanges.join('\n') + '\n──────────────────────────────\n' : '') +
-      (catLines          ? catLines              + '\n──────────────────────────────\n' : '') +
-      `⏱️ Scan duration: **${scanDurStr}**\n` +
-      `⏳ Next run in **${delayMins}** minutes at **${nextTimeFull}**`
-    ),
+    description,
   };
 
   const logoFile = stats.logoFile || null;
@@ -89,19 +99,25 @@ async function postStoreSummary(stats, scanDurStr, delayMins, nextTimeFull) {
   if (hasLogo) embed.thumbnail = { url: `attachment://${path.basename(logoFile)}` };
 
   try {
+    let res;
     if (hasLogo) {
       const form = new FormData();
       form.append('payload_json', JSON.stringify({ embeds: [embed] }));
       form.append('files[0]', new Blob([fs.readFileSync(logoFile)], { type: 'image/png' }), path.basename(logoFile));
-      await fetch(MONITOR_WEBHOOK_URL, { method: 'POST', body: form });
+      res = await fetch(MONITOR_WEBHOOK_URL, { method: 'POST', body: form });
     } else {
-      await fetch(MONITOR_WEBHOOK_URL, {
+      res = await fetch(MONITOR_WEBHOOK_URL, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ embeds: [embed] }),
       });
     }
-    console.log(`Posted run summary for ${stats.storeName}.`);
+    if (res.ok) {
+      console.log(`Posted run summary for ${stats.storeName}.`);
+    } else {
+      const body = await res.text().catch(() => '');
+      console.error(`Run summary post failed: HTTP ${res.status}`, body.slice(0, 300));
+    }
   } catch (err) { console.error('Failed to post summary:', err.message); }
 }
 
