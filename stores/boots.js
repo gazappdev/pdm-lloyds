@@ -13,6 +13,10 @@ const PAGE_SIZE  = 24;
 // To add more categories: run node scripts/test-boots.js (TEST_BOOTS=1 on Bisect) and drill the tree.
 const CATEGORIES = [
   { id: '2608697', label: 'Skincare Savings' },
+  { id: '1595059', label: 'Toiletries Offers' },
+  { id: '1595046', label: 'Fragrance Offers' },
+  { id: '1595111', label: 'Electrical Offers' },
+  { id: '1595040', label: 'Hair' },
 ];
 
 const EMBED_COLOR = 0x003DA5; // Boots blue (Pantone 286C)
