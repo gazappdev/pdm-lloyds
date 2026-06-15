@@ -1,10 +1,22 @@
 'use strict';
 
-// Run with: node scripts/test-boots.js
+// Run with: node scripts/test-boots.js  OR  set TEST_BOOTS=1 in Bisect env and restart.
 // Purpose : probe boots.com to determine reachability and API structure from this host.
+//
+// FINDINGS SO FAR (run 1):
+//   - HTML category page → Incapsula JS challenge (6183 bytes). IP is NOT blocked; challenge is JS-based.
+//   - Wrong API paths return real WCS 937KB 404 pages → they pass through Incapsula.
+//   - Platform: IBM WebSphere Commerce (storeId=11352, catalogId=28501).
+//   - This run: probe correct WCS REST API paths + attempt cookie carry-over.
 
 const CATEGORY_URL = 'https://www.boots.com/beauty/skincare/skincare-savings';
 const ORIGIN       = 'https://www.boots.com';
+const STORE_ID     = '11352';
+const CATALOG_ID   = '28501';
+
+// Incapsula session cookie from run 1 — may help carry state on second request.
+// If a new cookie is set in run 2, update this value for run 3.
+const INCAP_COOKIE = 'incap_ses_1398_949787=dqLLO/teXD/uJI65yLFmE24iMGoAAAAA6YMEDSXUg94w4sb7wztHWw==';
 
 const BROWSER_HEADERS = {
   'Accept':                    'text/html,application/xhtml+xml,*/*;q=0.9',
@@ -26,164 +38,156 @@ const JSON_HEADERS = {
 
 const hr = () => console.log('─'.repeat(70));
 
-async function probeHtml(label, url) {
-  hr();
-  console.log(`HTML TEST: ${label}`);
-  console.log(`URL      : ${url}`);
-  try {
-    const res = await fetch(url, { headers: BROWSER_HEADERS, redirect: 'follow' });
-    console.log(`Status   : ${res.status} ${res.statusText}`);
+// Collect cookies across requests to carry Incapsula state forward.
+const cookieJar = new Map();
 
-    // Print relevant response headers
-    for (const h of ['content-type', 'set-cookie', 'x-powered-by', 'x-request-id', 'server', 'cf-ray', 'x-cache']) {
-      const v = res.headers.get(h);
-      if (v) console.log(`Header   : ${h}: ${v.slice(0, 120)}`);
-    }
+function applyJar(headers) {
+  const entries = [...cookieJar.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
+  return entries ? { ...headers, Cookie: entries } : headers;
+}
 
-    const text = await res.text();
-    console.log(`Body len : ${text.length} chars`);
-
-    if (res.status !== 200) {
-      console.log('Body (first 600):');
-      console.log(text.slice(0, 600));
-      return { status: res.status, text };
-    }
-
-    // --- Incapsula / bot-wall detection ---
-    if (text.includes('_Incapsula_Resource') || text.includes('incap_ses')) {
-      console.log('⚠️  INCAPSULA CHALLENGE in body — JS execution required to proceed');
-    } else {
-      console.log('✅ No Incapsula challenge in body');
-    }
-
-    // --- Next.js embedded data ---
-    const nextData = text.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    if (nextData) {
-      console.log('\n✅ __NEXT_DATA__ found (Next.js SSR):');
-      const parsed = JSON.parse(nextData[1]);
-      // Print structure without full product dump
-      console.log('   Keys:', Object.keys(parsed).join(', '));
-      const pageProps = parsed?.props?.pageProps;
-      if (pageProps) console.log('   pageProps keys:', Object.keys(pageProps).join(', '));
-      // Look for product arrays
-      const raw = JSON.stringify(pageProps || parsed);
-      const prodCount = (raw.match(/"productId"|"sku"|"product_id"/g) || []).length;
-      if (prodCount > 0) console.log(`   ⭐ product-like keys found ${prodCount} times in __NEXT_DATA__`);
-      console.log('\n__NEXT_DATA__ (first 3000 chars):');
-      console.log(nextData[1].slice(0, 3000));
-    } else {
-      console.log('   No __NEXT_DATA__ found');
-    }
-
-    // --- Algolia ---
-    if (text.toLowerCase().includes('algolia')) {
-      const appId  = text.match(/["']?applicationId["']?\s*[=:]\s*["']([A-Z0-9]{6,12})["']/i)?.[1];
-      const apiKey = text.match(/["']?apiKey["']?\s*[=:]\s*["']([a-f0-9]{16,40})["']/i)?.[1];
-      const index  = text.match(/["']?indexName["']?\s*[=:]\s*["']([^"']{3,60})["']/i)?.[1];
-      console.log(`\n✅ ALGOLIA referenced — appId: ${appId || '?'}  apiKey: ${apiKey || '?'}  index: ${index || '?'}`);
-    }
-
-    // --- Embedded JSON-LD ---
-    const jsonLds = [...text.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
-    if (jsonLds.length) {
-      console.log(`\n✅ ${jsonLds.length} JSON-LD block(s):`);
-      jsonLds.slice(0, 4).forEach((m, i) => {
-        try {
-          const d = JSON.parse(m[1]);
-          const type = d['@type'] || d['@graph']?.[0]?.['@type'] || '?';
-          console.log(`   Block ${i + 1}: @type=${type}`);
-          if (type === 'Product') console.log('   ⭐ Product JSON-LD found:', JSON.stringify(d).slice(0, 300));
-        } catch { console.log(`   Block ${i + 1}: JSON parse error`); }
-      });
-    }
-
-    // --- API endpoint references ---
-    const apiRefs = [...new Set([...text.matchAll(/["'](\/api\/[^"'?#\s]{4,80})/g)].map(m => m[1]))];
-    if (apiRefs.length) {
-      console.log('\n✅ /api/* paths in page source:');
-      apiRefs.slice(0, 25).forEach(u => console.log('  ', u));
-    }
-
-    // --- GraphQL ---
-    if (text.includes('graphql') || text.includes('GraphQL')) {
-      const gql = text.match(/["'](\/[^"']*graphql[^"']*?)["']/i)?.[1];
-      console.log(`\n✅ GraphQL endpoint hint: ${gql || 'present (no URL extracted)'}`);
-    }
-
-    // --- Body preview ---
-    console.log('\nBody (first 1500 chars):');
-    console.log(text.slice(0, 1500));
-
-    return { status: res.status, text };
-  } catch (err) {
-    console.log(`ERROR: ${err.message}`);
-    return { status: null };
+function harvestCookies(res) {
+  // Node fetch doesn't expose set-cookie as array, use raw header
+  const raw = res.headers.get('set-cookie') || '';
+  for (const part of raw.split(',')) {
+    const kv = part.trim().split(';')[0];
+    const eq = kv.indexOf('=');
+    if (eq > 0) cookieJar.set(kv.slice(0, eq).trim(), kv.slice(eq + 1).trim());
   }
 }
 
-async function probeJson(label, url) {
+// Seed jar with cookie from run 1
+for (const part of INCAP_COOKIE.split(';')) {
+  const eq = part.indexOf('=');
+  if (eq > 0) cookieJar.set(part.slice(0, eq).trim(), part.slice(eq + 1).trim());
+}
+
+async function probe(label, url, headers, expectJson = false) {
   hr();
-  console.log(`API TEST : ${label}`);
-  console.log(`URL      : ${url}`);
+  console.log(`TEST : ${label}`);
+  console.log(`URL  : ${url}`);
   try {
-    const res = await fetch(url, { headers: JSON_HEADERS, redirect: 'follow' });
-    console.log(`Status   : ${res.status} ${res.statusText}`);
+    const res = await fetch(url, { headers: applyJar(headers), redirect: 'follow' });
+    harvestCookies(res);
+    console.log(`Status : ${res.status} ${res.statusText}`);
+
+    for (const h of ['content-type', 'set-cookie', 'server', 'x-powered-by']) {
+      const v = res.headers.get(h);
+      if (v) console.log(`Header : ${h}: ${v.slice(0, 150)}`);
+    }
+
     const text = await res.text();
     console.log(`Body len : ${text.length} chars`);
-    if (res.status === 200) {
+
+    // Incapsula challenge detection
+    if (text.includes('_Incapsula_Resource') || text.includes('reeseSkipExpirationCheck') || text.includes('Pardon Our Interruption')) {
+      console.log('⚠️  INCAPSULA CHALLENGE — JS execution required');
+      return { status: res.status, blocked: true, text };
+    }
+
+    if (expectJson || res.headers.get('content-type')?.includes('json')) {
       try {
         const data = JSON.parse(text);
         console.log('✅ Valid JSON. Top-level keys:', Object.keys(data).join(', '));
-        // Look for product arrays
         const raw = JSON.stringify(data);
-        const count = (raw.match(/"sku"|"productId"|"product_code"|"price"/g) || []).length;
-        if (count > 0) console.log(`   ⭐ product-like keys found ${count} times`);
-        console.log('Response (first 1500 chars):', text.slice(0, 1500));
+        const hits = (raw.match(/"price"|"sku"|"productId"|"partNumber"|"name"/g) || []).length;
+        if (hits) console.log(`   ⭐ product-like keys hit ${hits} times`);
+        console.log('Response (first 3000 chars):\n', text.slice(0, 3000));
+        return { status: res.status, blocked: false, json: data, text };
       } catch {
-        console.log('Body is not JSON. First 600 chars:');
-        console.log(text.slice(0, 600));
+        console.log('Content-type is JSON but body did not parse. First 600:\n', text.slice(0, 600));
       }
     } else {
-      console.log('Body (first 300):', text.slice(0, 300));
+      // HTML — look for useful signals
+      if (text.includes('__NEXT_DATA__')) {
+        const m = text.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+        console.log('✅ __NEXT_DATA__ found:\n', m ? m[1].slice(0, 3000) : '(no match)');
+      }
+      const apiRefs = [...new Set([...text.matchAll(/["'](\/(?:wcs|api|rest)[^"'?#\s]{4,80})/g)].map(m => m[1]))];
+      if (apiRefs.length) {
+        console.log('✅ API paths in page:');
+        apiRefs.slice(0, 20).forEach(u => console.log('  ', u));
+      }
+      const categoryIds = [...text.matchAll(/categoryId[=:]["']?(\d{5,20})/g)].map(m => m[1]);
+      if (categoryIds.length) console.log('✅ Category IDs found:', [...new Set(categoryIds)].join(', '));
+      console.log('Body (first 2000):\n', text.slice(0, 2000));
     }
+    return { status: res.status, blocked: false, text };
   } catch (err) {
     console.log(`ERROR: ${err.message}`);
+    return { status: null, blocked: null };
   }
 }
 
 (async () => {
-  console.log('Boots.com probe script');
+  console.log('Boots.com probe script — RUN 2 (WCS API focus)');
   console.log('Date        :', new Date().toISOString());
   console.log('Node version:', process.version);
-  console.log('Host IP will appear in any Incapsula error message above.');
+  console.log('Seeded cookie jar with incap_ses from run 1.\n');
 
-  // 1. Main category page (HTML)
-  const { text } = await probeHtml('Skincare savings category page', CATEGORY_URL);
+  // ── 1. Category page again (with prior incap cookie) ───────────────────
+  await probe('Category page WITH incap cookie', CATEGORY_URL, BROWSER_HEADERS);
 
-  // 2. Hybris / SAP Commerce patterns (common UK retailers)
-  await probeJson('Hybris category JSON (?format=json)',         `${ORIGIN}/c/beauty/skincare/skincare-savings?format=json`);
-  await probeJson('Hybris REST v2 product search',               `${ORIGIN}/rest/v2/boots/products/search?query=:relevance:category:beauty-skincare-savings&pageSize=24&lang=en&curr=GBP`);
-  await probeJson('Hybris REST v2 category',                     `${ORIGIN}/rest/v2/boots/categories/beauty-skincare-savings`);
+  // ── 2. WCS REST API — product search (most likely to work) ─────────────
+  // WCS Commerce REST API: /wcs/resources/store/{storeId}/productview/...
+  await probe(
+    'WCS productview bySearchTerm: skincare savings',
+    `${ORIGIN}/wcs/resources/store/${STORE_ID}/productview/bySearchTerm/*?searchTerm=skincare+savings&pageSize=24&pageNumber=1&lang=-1&currency=GBP`,
+    JSON_HEADERS, true
+  );
 
-  // 3. Generic API guesses
-  await probeJson('Generic /api/product-listing',                `${ORIGIN}/api/product-listing?categoryId=skincare-savings&pageSize=24`);
-  await probeJson('Generic /api/products/search',                `${ORIGIN}/api/products/search?category=beauty-skincare-savings`);
-  await probeJson('Generic /api/2.0/page/category',             `${ORIGIN}/api/2.0/page/category?url=/beauty/skincare/skincare-savings`);
+  // ── 3. WCS category listing ─────────────────────────────────────────────
+  await probe(
+    'WCS categoryview top-level (get category IDs)',
+    `${ORIGIN}/wcs/resources/store/${STORE_ID}/categoryview/@top?depthAndLimit=2,10&lang=-1`,
+    JSON_HEADERS, true
+  );
 
-  // 4. If HTML loaded, try to find any XHR endpoint embedded in the source
-  if (text) {
-    const ajaxUrls = [...new Set([
-      ...[...text.matchAll(/["'`](https:\/\/www\.boots\.com\/[^"'`\s]{10,120}?(?:json|products|search|catalog|api)[^"'`\s]{0,60})["'`]/g)].map(m => m[1]),
-    ])];
-    if (ajaxUrls.length) {
-      console.log('\n');
-      hr();
-      console.log(`Found ${ajaxUrls.length} boots.com URL(s) in page source — probing each:`);
-      for (const url of ajaxUrls.slice(0, 5)) {
-        await probeJson(`Embedded URL: ${url.slice(0, 60)}...`, url);
-      }
-    }
-  }
+  // ── 4. WCS SEO URL → category ID resolver ──────────────────────────────
+  await probe(
+    'WCS SEO URL token resolver',
+    `${ORIGIN}/wcs/resources/store/${STORE_ID}/seo/token?q=%2Fbeauty%2Fskincare%2Fskincare-savings`,
+    JSON_HEADERS, true
+  );
+
+  // ── 5. WCS Ajax product listing servlet ────────────────────────────────
+  await probe(
+    'WCS AjaxProductListingView servlet (search)',
+    `${ORIGIN}/webapp/wcs/stores/servlet/AjaxProductListingView?storeId=${STORE_ID}&catalogId=${CATALOG_ID}&searchTerm=skincare+savings&pageSize=24&pageNumber=1&langId=-1`,
+    JSON_HEADERS, true
+  );
+
+  // ── 6. WCS category servlet (JSON variant) ─────────────────────────────
+  await probe(
+    'WCS CategoryDisplay servlet',
+    `${ORIGIN}/webapp/wcs/stores/servlet/CategoryDisplay?storeId=${STORE_ID}&catalogId=${CATALOG_ID}&langId=-1&identifier=beauty-skincare-savings`,
+    BROWSER_HEADERS
+  );
+
+  // ── 7. WCS product view by category identifier ─────────────────────────
+  await probe(
+    'WCS productview byCategory identifier',
+    `${ORIGIN}/wcs/resources/store/${STORE_ID}/productview/byCategory/beauty-skincare-savings?pageSize=24&pageNumber=1&lang=-1`,
+    JSON_HEADERS, true
+  );
+
+  // ── 8. WCS product search with catalog ─────────────────────────────────
+  await probe(
+    'WCS productview bySearchTerm: skincare-savings (exact slug)',
+    `${ORIGIN}/wcs/resources/store/${STORE_ID}/productview/bySearchTerm/*?searchTerm=skincare-savings&pageSize=24&pageNumber=1&lang=-1&catalogId=${CATALOG_ID}`,
+    JSON_HEADERS, true
+  );
+
+  // ── 9. WCS Elasticsearch / Search REST ─────────────────────────────────
+  await probe(
+    'WCS Search REST API',
+    `${ORIGIN}/search/resources/store/${STORE_ID}/productview/bySearchTerm/*?searchTerm=skincare+savings&pageSize=24&pageNumber=1&lang=-1`,
+    JSON_HEADERS, true
+  );
+
+  hr();
+  console.log('Current cookie jar:');
+  for (const [k, v] of cookieJar.entries()) console.log(`  ${k}=${v.slice(0, 60)}`);
 
   hr();
   console.log('PROBE COMPLETE');
