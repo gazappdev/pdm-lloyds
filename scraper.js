@@ -12,9 +12,10 @@ if (process.env.TEST_BOOTS === '1') {
 }
 
 const lloyds = require('./stores/lloyds');
+const boots  = require('./stores/boots');
 
-// Stores run sequentially. Add more pharmacy/health stores here in future.
-const STORES = [lloyds];
+// Stores run sequentially.
+const STORES = [lloyds, boots];
 
 const MONITOR_WEBHOOK_URL   = process.env.MONITOR_WEBHOOK_URL       || '';
 const SCRAPESHEET_WEBHOOK   = process.env.SCRAPESHEET_WEBHOOK_URL   || '';
