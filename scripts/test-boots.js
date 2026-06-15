@@ -1,7 +1,9 @@
 'use strict';
 
 // Run with: TEST_BOOTS=1 on Bisect.
-// Purpose: find numeric category IDs for new categories to add to CATEGORIES array.
+// Purpose: find category IDs for toiletries, fragrance, electrical, beauty/hair.
+// Run 8 found: top-level has "Shop by department" [1590591] and "Offers" [2357689].
+// Departments (beauty, toiletries, etc.) must be children of one of those.
 
 const ORIGIN   = 'https://www.boots.com';
 const STORE_ID = '11352';
@@ -13,110 +15,112 @@ const API_HEADERS = {
   'Cache-Control':   'no-cache',
 };
 
-// Target category paths we want to identify
-// Each entry: [depth-1 label fragment, depth-2 label fragment (or null if depth-1 is the target)]
-const TARGETS = [
-  { slug: 'toiletries/toiletries-offers',  search: ['toiletries', 'offer'] },
-  { slug: 'fragrance/fragrance-offers',    search: ['fragrance',  'offer'] },
-  { slug: 'electrical/electrical-offers',  search: ['electrical', 'offer'] },
-  { slug: 'beauty/hair',                   search: ['beauty',     'hair']  },
-];
-
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const hr    = () => console.log('─'.repeat(70));
 
-async function getCategories(parentId) {
-  const url = parentId === 'top'
-    ? `${ORIGIN}/search/resources/store/${STORE_ID}/categoryview/@top?langId=-1`
-    : `${ORIGIN}/search/resources/store/${STORE_ID}/categoryview/byParentCategory/${parentId}?langId=-1`;
+// Target leaf-node name fragments to locate
+const TARGETS = [
+  'toiletries-offers',
+  'fragrance-offers',
+  'electrical-offers',
+  'hair',
+];
+
+async function getChildren(parentId) {
+  const url = `${ORIGIN}/search/resources/store/${STORE_ID}/categoryview/byParentCategory/${parentId}?langId=-1`;
   try {
     const res = await fetch(url, { headers: API_HEADERS });
     if (!res.ok) return [];
     const data = await res.json();
     return (data.catalogGroupView || []).map(c => ({
-      id:       c.uniqueID,
-      name:     (c.name || '').trim(),
-      seoToken: c.seo_token_ntk || '',
+      id:    c.uniqueID,
+      name:  (c.name || '').trim(),
+      token: (c.seo_token_ntk || '').trim(),
     }));
   } catch { return []; }
 }
 
-function matches(name, fragment) {
-  return name.toLowerCase().includes(fragment.toLowerCase());
+function hit(cat, fragment) {
+  const combined = (cat.name + ' ' + cat.token).toLowerCase();
+  return combined.includes(fragment.toLowerCase().replace(/-/g, ' '))
+      || combined.includes(fragment.toLowerCase());
 }
 
 (async () => {
-  console.log('Boots.com probe — RUN 8 (category ID lookup)');
+  console.log('Boots.com probe — RUN 9 (drill Shop by dept + Offers)');
   console.log('Date:', new Date().toISOString());
-  hr();
-
-  // 1. Get top-level categories
-  console.log('Fetching top-level categories...');
-  const topCats = await getCategories('top');
-  console.log(`Found ${topCats.length} top-level categories:`);
-  topCats.forEach(c => console.log(`  [${c.id}] ${c.name}  (${c.seoToken})`));
-
-  hr();
 
   const found = {};
 
-  // 2. For each target, find depth-1 match then depth-2 match
-  for (const target of TARGETS) {
-    const [d1frag, d2frag] = target.search;
-    console.log(`\nLooking for: ${target.slug}`);
+  // ── Drill "Shop by department" [1590591] ────────────────────────────────
+  hr();
+  console.log('Children of "Shop by department" [1590591]:');
+  const depts = await getChildren('1590591');
+  depts.forEach(c => console.log(`  [${c.id}] ${c.name}  token:${c.token}`));
 
-    const depth1 = topCats.filter(c => matches(c.name, d1frag));
-    if (depth1.length === 0) {
-      console.log(`  ❌ No top-level category matching "${d1frag}"`);
-      continue;
-    }
-
-    for (const d1cat of depth1) {
-      console.log(`  Depth-1 match: [${d1cat.id}] ${d1cat.name}`);
-
-      if (!d2frag) {
-        found[target.slug] = { id: d1cat.id, label: d1cat.name };
-        console.log(`  ✅ TARGET FOUND: id=${d1cat.id}  label="${d1cat.name}"`);
-        continue;
-      }
-
-      await sleep(300);
-      const depth2 = await getCategories(d1cat.id);
-      console.log(`  Depth-2 (${depth2.length} subcats): ${depth2.map(c => c.name).join(', ')}`);
-
-      const d2match = depth2.filter(c => matches(c.name, d2frag));
-      if (d2match.length === 0) {
-        // Try one level deeper for each depth-2 category
-        console.log(`  No depth-2 match for "${d2frag}" — drilling depth-3...`);
-        for (const d2cat of depth2) {
-          await sleep(200);
-          const depth3 = await getCategories(d2cat.id);
-          const d3match = depth3.filter(c => matches(c.name, d2frag));
-          if (d3match.length > 0) {
-            d3match.forEach(c => {
-              console.log(`  ✅ DEPTH-3 MATCH: [${c.id}] ${c.name}  (under ${d2cat.name})`);
-              if (!found[target.slug]) found[target.slug] = { id: c.id, label: c.name };
-            });
-          }
+  // For each dept, get its children and look for offer-type subcategories
+  for (const dept of depts) {
+    await sleep(250);
+    const subs = await getChildren(dept.id);
+    const offerSubs = subs.filter(c =>
+      TARGETS.some(t => hit(c, t))
+    );
+    if (offerSubs.length > 0) {
+      offerSubs.forEach(c => {
+        console.log(`  ✅ ${dept.name} → [${c.id}] ${c.name}  token:${c.token}`);
+        for (const t of TARGETS) {
+          if (hit(c, t) && !found[t]) found[t] = { id: c.id, label: `${c.name}` };
         }
-      } else {
-        d2match.forEach(c => {
-          console.log(`  ✅ TARGET FOUND: id=${c.id}  label="${c.name}"`);
-          if (!found[target.slug]) found[target.slug] = { id: c.id, label: c.name };
-        });
+      });
+    }
+
+    // "hair" may be a direct dept child, not a sub-offers page
+    if (TARGETS.some(t => hit(dept, t))) {
+      console.log(`  ✅ DEPT LEVEL: [${dept.id}] ${dept.name}  token:${dept.token}`);
+      for (const t of TARGETS) {
+        if (hit(dept, t) && !found[t]) found[t] = { id: dept.id, label: dept.name };
       }
     }
-    await sleep(300);
   }
 
+  // ── Drill "Offers" [2357689] ────────────────────────────────────────────
   hr();
-  console.log('\nSUMMARY — add these to CATEGORIES in stores/boots.js:');
-  for (const target of TARGETS) {
-    const result = found[target.slug];
-    if (result) {
-      console.log(`  { id: '${result.id}', label: '${result.label}' },  // ${target.slug}`);
+  console.log('Children of "Offers" [2357689]:');
+  await sleep(300);
+  const offerCats = await getChildren('2357689');
+  offerCats.forEach(c => console.log(`  [${c.id}] ${c.name}  token:${c.token}`));
+
+  for (const cat of offerCats) {
+    for (const t of TARGETS) {
+      if (hit(cat, t) && !found[t]) {
+        console.log(`  ✅ OFFERS → [${cat.id}] ${cat.name}`);
+        found[t] = { id: cat.id, label: cat.name };
+      }
+    }
+    // If it's a broad match (e.g. "Toiletries") drill one level deeper for "offers" sub
+    const nameFrags = ['toiletries', 'fragrance', 'electrical', 'beauty', 'hair'];
+    if (nameFrags.some(f => cat.name.toLowerCase().includes(f))) {
+      await sleep(200);
+      const subs2 = await getChildren(cat.id);
+      const offerSubs2 = subs2.filter(c => TARGETS.some(t => hit(c, t)));
+      offerSubs2.forEach(c => {
+        console.log(`  ✅ OFFERS→${cat.name} → [${c.id}] ${c.name}`);
+        for (const t of TARGETS) {
+          if (hit(c, t) && !found[t]) found[t] = { id: c.id, label: c.name };
+        }
+      });
+    }
+  }
+
+  // ── Summary ──────────────────────────────────────────────────────────────
+  hr();
+  console.log('SUMMARY — CATEGORIES entries for stores/boots.js:');
+  for (const t of TARGETS) {
+    const r = found[t];
+    if (r) {
+      console.log(`  { id: '${r.id}', label: '${r.label}' },  // ${t}`);
     } else {
-      console.log(`  // ❌ NOT FOUND: ${target.slug}`);
+      console.log(`  // ❌ NOT FOUND: ${t}`);
     }
   }
 
