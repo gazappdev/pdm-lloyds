@@ -11,7 +11,7 @@ const CACHE_FILE      = path.resolve(__dirname, '..', 'last_seen_lloyds.json');
 const CATEGORIES_FILE = path.resolve(__dirname, '..', 'known_categories_lloyds.json');
 
 const EMBED_COLOR = 0x98BD0D;
-const LOGO_FILE   = path.resolve(__dirname, '..', 'lloyds.png');
+const LOGO_FILE   = path.resolve(__dirname, '..', 'lloyds.jpg');
 const FOOTER_TEXT = 'Powered by Reseller Hub';
 const FOOTER_ICON = 'https://i.imgur.com/aXI4ucP.png';
 
