@@ -187,4 +187,5 @@ async function probeJson(label, url) {
 
   hr();
   console.log('PROBE COMPLETE');
+  process.exit(0);
 })();

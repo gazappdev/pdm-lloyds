@@ -5,6 +5,12 @@ const path = require('path');
 const cron = require('node-cron');
 require('dotenv').config();
 
+// One-shot diagnostic mode: set TEST_BOOTS=1 in Bisect env, restart, read console, then remove it.
+if (process.env.TEST_BOOTS === '1') {
+  require('./scripts/test-boots.js');
+  return;
+}
+
 const lloyds = require('./stores/lloyds');
 
 // Stores run sequentially. Add more pharmacy/health stores here in future.
