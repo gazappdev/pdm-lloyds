@@ -2,17 +2,18 @@
 
 // Run with: node scripts/test-boots.js  OR  set TEST_BOOTS=1 in Bisect env and restart.
 //
-// FINDINGS SO FAR:
-//   Platform: IBM WebSphere Commerce. storeId=11352, catalogId=28501.
-//   Incapsula blocks text identifiers; numeric IDs pass through cleanly.
-//   /wcs/resources/store/11352/productview/byCategory/{numericId} → works ✅
-//   /search/resources/store/11352/productview/byCategory/{numericId} → works ✅ (richer data, has both prices)
-//   Price: Display/L = was price, Offer/I = current price.
-//   "beauty & skincare" category ID = 1595015.
-//   This run: drill 1595015 → find skincare → find skincare-savings numeric ID.
+// CONFIRMED FINDINGS:
+//   Platform: IBM WebSphere Commerce. storeId=11352.
+//   Skincare savings category ID: 2608697.
+//   API: /search/resources/store/11352/productview/byCategory/2608697?pageSize=24&pageNumber=1&lang=-1
+//   466 products, 20 pages.
+//   EAN: attributes.find(identifier==="barcode").values[0].value — 100% populated.
+//   Prices: Display/L = current sale price, Offer/I = normal/was price.
+//   This run: get full single-product JSON to find image URL and product page URL format.
 
 const ORIGIN   = 'https://www.boots.com';
 const STORE_ID = '11352';
+const SKINCARE_SAVINGS_ID = '2608697';
 
 const JSON_HEADERS = {
   'Accept':          'application/json, */*;q=0.9',
@@ -29,156 +30,103 @@ async function get(label, url) {
   console.log(`URL  : ${url}`);
   try {
     const res = await fetch(url, { headers: JSON_HEADERS, redirect: 'follow' });
-    console.log(`Status : ${res.status} ${res.statusText}`);
+    console.log(`Status : ${res.status}`);
     const text = await res.text();
-    console.log(`Body len : ${text.length} chars`);
-    if (text.includes('reeseSkipExpirationCheck') || text.includes('Pardon Our Interruption')) {
-      console.log('⚠️  INCAPSULA CHALLENGE — blocked'); return null;
-    }
-    try { return { status: res.status, data: JSON.parse(text) }; }
-    catch { console.log('Not JSON. First 400:\n', text.slice(0, 400)); return null; }
+    if (text.includes('reeseSkipExpirationCheck')) { console.log('⚠️  INCAPSULA BLOCKED'); return null; }
+    try { return { status: res.status, data: JSON.parse(text), text }; }
+    catch { console.log('Not JSON:\n', text.slice(0, 400)); return null; }
   } catch (err) { console.log(`ERROR: ${err.message}`); return null; }
 }
 
-function printCats(cats, indent = '') {
-  if (!Array.isArray(cats)) return;
-  for (const c of cats) {
-    console.log(`${indent}[${c.uniqueID}] "${c.name}" (${c.identifier})`);
-    if (c.CatalogGroupView) printCats(c.CatalogGroupView, indent + '  ');
-  }
-}
-
-function findByName(cats, keyword, results = []) {
-  if (!Array.isArray(cats)) return results;
-  for (const c of cats) {
-    if ((c.name || '').toLowerCase().includes(keyword) || (c.identifier || '').toLowerCase().includes(keyword)) {
-      results.push(c);
-    }
-    findByName(c.CatalogGroupView, keyword, results);
-  }
-  return results;
-}
-
 (async () => {
-  console.log('Boots.com probe — RUN 4 (find skincare-savings numeric ID)');
+  console.log('Boots.com probe — RUN 5 (product image + URL structure)');
   console.log('Date:', new Date().toISOString());
 
-  // ── 1. Drill "beauty & skincare" (1595015) — depth 3, limit 50 ─────────
-  const beauty = await get(
-    'categoryview under beauty & skincare (1595015) — depth 3, limit 50',
-    `${ORIGIN}/wcs/resources/store/${STORE_ID}/categoryview/byParentCategory/1595015?depthAndLimit=3,50&lang=-1`
+  // ── 1. Full category page 1 — print COMPLETE first product JSON ─────────
+  const cat = await get(
+    'Full product listing (page 1) — print entire first product entry',
+    `${ORIGIN}/search/resources/store/${STORE_ID}/productview/byCategory/${SKINCARE_SAVINGS_ID}?pageSize=5&pageNumber=1&lang=-1`
   );
+  if (cat?.data) {
+    const items = cat.data.catalogEntryView || [];
+    console.log(`\nTotal products: ${cat.data.recordSetTotal}  — Returned: ${items.length}`);
+    if (items.length) {
+      console.log('\n=== COMPLETE FIRST PRODUCT JSON ===');
+      // Print full JSON but exclude the giant attributes list for readability
+      const p = { ...items[0] };
+      const attrSummary = (p.attributes || []).slice(0, 5).map(a => ({
+        id: a.identifier, val: a.values?.[0]?.value
+      }));
+      delete p.attributes;
+      console.log(JSON.stringify(p, null, 2));
+      console.log('\n[attributes sample (first 5)]:');
+      console.log(JSON.stringify(attrSummary, null, 2));
 
-  let skincareId = null;
-  let skincaresSavingsId = null;
+      // Scan all top-level keys for image/url-like content
+      console.log('\n=== Keys containing "image", "img", "url", "seo", "href", "thumb", "photo" ===');
+      const raw = JSON.stringify(items[0]);
+      const keyMatches = [...raw.matchAll(/"([^"]*(?:image|img|url|seo|href|thumb|photo|fullImage|thumbnail)[^"]*)":/gi)];
+      const keys = [...new Set(keyMatches.map(m => m[1]))];
+      console.log('Matching keys:', keys.join(', '));
 
-  if (beauty?.data) {
-    const cats = beauty.data.CatalogGroupView || [];
-    console.log(`\nSubcategories of beauty & skincare (${cats.length} found):`);
-    printCats(cats, '  ');
-
-    // Auto-find skincare
-    const skincareMatches = findByName(cats, 'skincare');
-    if (skincareMatches.length) {
-      console.log('\n⭐ Skincare matches:');
-      skincareMatches.forEach(c => console.log(`  [${c.uniqueID}] "${c.name}" (${c.identifier})`));
-
-      // Find skincare-savings specifically
-      const savings = skincareMatches.find(c =>
-        c.name.toLowerCase().includes('saving') || c.identifier.toLowerCase().includes('saving')
-      );
-      if (savings) {
-        skincaresSavingsId = savings.uniqueID;
-        console.log(`\n🎯 FOUND SKINCARE SAVINGS: [${savings.uniqueID}] "${savings.name}"`);
-      } else {
-        // Take the parent skincare category to drill further
-        const parent = skincareMatches.find(c => !c.name.toLowerCase().includes('saving'));
-        if (parent) skincareId = parent.uniqueID;
+      // Print values for those keys
+      for (const key of keys.slice(0, 20)) {
+        const re = new RegExp(`"${key}":\\s*"([^"]{5,})"`, 'i');
+        const m  = raw.match(re);
+        if (m) console.log(`  ${key}: ${m[1].slice(0, 120)}`);
       }
     }
   }
 
-  // ── 2. If we found skincare parent but not savings, drill one level deeper
-  if (skincareId && !skincaresSavingsId) {
-    const skincare = await get(
-      `categoryview under skincare (${skincareId}) — depth 2, limit 50`,
-      `${ORIGIN}/wcs/resources/store/${STORE_ID}/categoryview/byParentCategory/${skincareId}?depthAndLimit=2,50&lang=-1`
-    );
-    if (skincare?.data) {
-      const cats = skincare.data.CatalogGroupView || [];
-      console.log(`\nSubcategories of skincare (${cats.length}):`);
-      printCats(cats, '  ');
-      const savings = findByName(cats, 'saving');
-      if (savings.length) {
-        skincaresSavingsId = savings[0].uniqueID;
-        console.log(`\n🎯 FOUND SKINCARE SAVINGS: [${savings[0].uniqueID}] "${savings[0].name}"`);
-      }
+  // ── 2. Single product by uniqueID — often has richer SEO data ──────────
+  const single = await get(
+    'Single product by uniqueID 11718 (Eucerin foot cream)',
+    `${ORIGIN}/search/resources/store/${STORE_ID}/productview/byId/11718?lang=-1`
+  );
+  if (single?.data) {
+    const p = single.data.catalogEntryView?.[0] || single.data;
+    console.log('\n=== Single product keys ===');
+    console.log(Object.keys(p).join(', '));
+
+    // Look for image and URL fields
+    const raw = JSON.stringify(p);
+    const imgMatch = raw.match(/"(?:fullImage|thumbnail|mediumImage|largeImage)":\s*"([^"]+)"/);
+    if (imgMatch) console.log('\nImage field found:', imgMatch[0]);
+    const seoMatch = raw.match(/"(?:seo|href|seoUrl|productUrl|slug)":\s*\{?([^}]{0,200})/);
+    if (seoMatch) console.log('\nSEO/URL field found:', seoMatch[0]);
+    console.log('\nFull single product (first 4000 chars):\n', raw.slice(0, 4000));
+  }
+
+  // ── 3. WCS classic byId — sometimes has image/URL not in search endpoint
+  const wcs = await get(
+    'WCS classic productview byId 11718',
+    `${ORIGIN}/wcs/resources/store/${STORE_ID}/productview/byId/11718?langId=-1&currency=GBP`
+  );
+  if (wcs?.data) {
+    const raw = JSON.stringify(wcs.data);
+    console.log('\nWCS byId — All keys in first CatalogEntryView:');
+    const p = wcs.data.CatalogEntryView?.[0];
+    if (p) {
+      console.log(Object.keys(p).join(', '));
+      const imgMatch = raw.match(/"(?:fullImage|thumbnail|mediumImage|attachments|Images)"[^:]*:[^{]*(\{[^}]+\}|"[^"]+")/g);
+      if (imgMatch) console.log('\nImage-like fields:', imgMatch.slice(0, 5).join('\n'));
+      console.log('\nFull WCS product (first 4000 chars):\n', raw.slice(0, 4000));
     }
   }
 
-  // ── 3. Verify: fetch products from skincare-savings by numeric ID ───────
-  if (skincaresSavingsId) {
-    console.log(`\n${'='.repeat(70)}`);
-    console.log(`🎯 Skincare savings category ID confirmed: ${skincaresSavingsId}`);
-    console.log('Testing product fetch from /search/resources/ (richer data)...');
-
-    const products = await get(
-      `search/resources productview byCategory ${skincaresSavingsId} (page 1)`,
-      `${ORIGIN}/search/resources/store/${STORE_ID}/productview/byCategory/${skincaresSavingsId}?pageSize=24&pageNumber=1&lang=-1`
-    );
-    if (products?.data) {
-      const items = products.data.catalogEntryView || [];
-      const total = products.data.recordSetTotal || products.data.recordSetTotalMatches;
-      console.log(`\n✅ Products returned: ${items.length} (total in category: ${total})`);
-      console.log(`   Pages needed: ${Math.ceil(total / 24)}`);
-
-      // Print first 3 products with full price detail
-      items.slice(0, 3).forEach((p, i) => {
-        const offerPrice   = p.price?.find(x => x.usage === 'Offer')?.value;
-        const displayPrice = p.price?.find(x => x.usage === 'Display')?.value;
-        console.log(`\n  Product ${i + 1}:`);
-        console.log(`    Name     : ${p.name}`);
-        console.log(`    partNum  : ${p.partNumber}`);
-        console.log(`    uniqueID : ${p.uniqueID}`);
-        console.log(`    Price now: £${offerPrice}`);
-        console.log(`    Was price: ${displayPrice ? '£' + displayPrice : '(not set)'}`);
-        // Look for EAN/barcode
-        const ean = p.attributes?.find(a => a.identifier === 'ean' || a.identifier === 'EAN' || a.identifier === 'barcode')?.values?.[0]?.value;
-        if (ean) console.log(`    EAN      : ${ean}`);
-        console.log(`    URL slug : ${p.seo?.href || p.seoUrl || '?'}`);
-      });
-
-      // Check attributes for EAN on all items
-      const withEan = items.filter(p =>
-        p.attributes?.some(a => ['ean','EAN','barcode','gtin','GTIN','EAN_Number'].includes(a.identifier))
-      );
-      console.log(`\n  Products with EAN attribute: ${withEan.length}/${items.length}`);
-      if (withEan.length) {
-        const sample = withEan[0];
-        const eanAttr = sample.attributes.find(a => ['ean','EAN','barcode','gtin','GTIN','EAN_Number'].includes(a.identifier));
-        console.log(`  Sample EAN attr: identifier="${eanAttr.identifier}" value="${eanAttr.values?.[0]?.value}"`);
-      }
-
-      // List all unique attribute identifiers across the 24 products
-      const allAttrIds = [...new Set(items.flatMap(p => (p.attributes || []).map(a => a.identifier)))].sort();
-      console.log(`\n  All attribute identifiers: ${allAttrIds.join(', ')}`);
+  // ── 4. Verify price ordering across more products ───────────────────────
+  hr();
+  console.log('Price ordering check across all 5 products from page 1:');
+  if (cat?.data) {
+    const items = cat.data.catalogEntryView || [];
+    for (const p of items) {
+      const display = p.price?.find(x => x.usage === 'Display')?.value;
+      const offer   = p.price?.find(x => x.usage === 'Offer')?.value;
+      const d = parseFloat(display || '0');
+      const o = parseFloat(offer   || '0');
+      const label = d < o ? 'Display < Offer (Display=CURRENT, Offer=WAS) ✅' : d > o ? 'Display > Offer ⚠️' : 'EQUAL';
+      console.log(`  ${p.name.slice(0, 50).padEnd(50)} Display:£${(display||'?').padStart(6)} Offer:£${(offer||'?').padStart(6)} → ${label}`);
     }
-
-    // Also test WCS classic endpoint for comparison
-    const wcsProducts = await get(
-      `wcs/resources productview byCategory ${skincaresSavingsId} (page 1)`,
-      `${ORIGIN}/wcs/resources/store/${STORE_ID}/productview/byCategory/${skincaresSavingsId}?pageSize=5&pageNumber=1&lang=-1&currency=GBP`
-    );
-    if (wcsProducts?.data) {
-      const items = wcsProducts.data.CatalogEntryView || [];
-      console.log(`\nWCS classic endpoint: ${items.length} products, total: ${wcsProducts.data.recordSetTotal}`);
-      items.slice(0, 2).forEach(p => {
-        console.log(`  ${p.name} — Price: ${JSON.stringify(p.Price)}`);
-      });
-    }
-  } else {
-    console.log('\n❌ Could not locate skincare-savings category ID automatically.');
-    console.log('Check the category tree output above and report back with any "savings" category IDs.');
   }
 
   hr();
