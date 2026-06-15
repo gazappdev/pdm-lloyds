@@ -147,17 +147,12 @@ async function enrichProduct(product) {
       ? `${ORIGIN}/${seoToken}`
       : `${ORIGIN}/search?q=${encodeURIComponent(product.partNum)}`;
 
-    // Image: thumbnail field (may be null in WCS; fall back to constructed path)
-    const thumb = detail.thumbnail;
-    if (thumb && !thumb.includes('null') && !thumb.includes('not defined')) {
-      product.imageUrl = thumb.startsWith('http') ? thumb : `${ORIGIN}${thumb}`;
-    } else {
-      product.imageUrl = `${ORIGIN}/wcsstore/eBootsStorefrontAssetStore/images/catalog/${product.partNum}_ms.jpg`;
-    }
   } else {
     product.productUrl = `${ORIGIN}/search?q=${encodeURIComponent(product.partNum)}`;
-    product.imageUrl   = `${ORIGIN}/wcsstore/eBootsStorefrontAssetStore/images/catalog/${product.partNum}_ms.jpg`;
   }
+
+  // Scene7 CDN — confirmed in probe run 7; constructed from partNum, no API call needed.
+  product.imageUrl = `https://boots.scene7.com/is/image/Boots/${product.partNum}`;
 }
 
 // ===== CHANGE DETECTION =====
