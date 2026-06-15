@@ -15,7 +15,7 @@ const CATEGORIES = [
   { id: '2608697', label: 'Skincare Savings' },
 ];
 
-const EMBED_COLOR = 0x001489; // Boots blue
+const EMBED_COLOR = 0x003DA5; // Boots blue (Pantone 286C)
 const CACHE_FILE  = path.resolve(__dirname, '..', 'last_seen_boots.json');
 const LOGO_FILE   = path.resolve(__dirname, '..', 'boots.png');
 const FOOTER_TEXT = 'Powered by Reseller Hub';
