@@ -15,8 +15,8 @@ const lloyds      = require('./stores/lloyds');
 const boots       = require('./stores/boots');
 const entertainer = require('./stores/entertainer');
 
-// Stores run sequentially.
-const STORES = [lloyds, boots, entertainer];
+// Stores run sequentially. Entertainer first while validating; reorder once confirmed.
+const STORES = [entertainer, lloyds, boots];
 
 const MONITOR_WEBHOOK_URL   = process.env.MONITOR_WEBHOOK_URL       || '';
 const SCRAPESHEET_WEBHOOK   = process.env.SCRAPESHEET_WEBHOOK_URL   || '';
