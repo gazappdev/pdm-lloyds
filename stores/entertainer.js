@@ -148,10 +148,7 @@ function parseProduct(raw, categoryLabel) {
 async function enrichProduct(product) {
   await sleep(300 + randInt(0, 200));
   const ean = await fetchEan(product.sku);
-  if (ean) {
-    product.ean = ean;
-    if (product._cacheRef) product._cacheRef.ean = ean;
-  }
+  if (ean) product.ean = ean;
 }
 
 // ===== CHANGE DETECTION =====
@@ -294,6 +291,27 @@ async function postToDiscord(p, type) {
 
   const embed = makeEmbed(p, type);
 
+  // thetoyshop.com's CDN blocks Discord's proxy (data centre IP → 403).
+  // Download the image in the bot and send as a file attachment so Discord
+  // hosts it on its own CDN, bypassing the block entirely.
+  let imageBuffer = null;
+  if (p.imageUrl) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      const imgRes  = await fetch(p.imageUrl, { signal: controller.signal }).finally(() => clearTimeout(timer));
+      if (imgRes.ok) {
+        imageBuffer = Buffer.from(await imgRes.arrayBuffer());
+        embed.thumbnail = { url: 'attachment://product.jpg' };
+        console.log(`[${STORE_NAME}] Image downloaded for ${p.sku}: ${imageBuffer.length} bytes`);
+      } else {
+        console.warn(`[${STORE_NAME}] Image download failed for ${p.sku}: HTTP ${imgRes.status}`);
+      }
+    } catch (e) {
+      console.warn(`[${STORE_NAME}] Image download error for ${p.sku}: ${e.message}`);
+    }
+  }
+
   let roleMention = null;
   if (p.discountPct && !isNaN(p.discountPct)) {
     const match = DISCOUNT_ROLES.find(r => p.discountPct >= r.minPct);
@@ -307,6 +325,13 @@ async function postToDiscord(p, type) {
         content:          roleMention,
         allowed_mentions: { roles: [matched.roleId] },
       });
+    }
+    if (imageBuffer) {
+      await enforcePostSpacing();
+      const form = new FormData();
+      form.append('payload_json', JSON.stringify({ embeds: [embed] }));
+      form.append('files[0]', new Blob([imageBuffer], { type: 'image/jpeg' }), 'product.jpg');
+      return fetch(url, { method: 'POST', body: form });
     }
     return sendWebhookJSON(url, { embeds: [embed] });
   };
@@ -362,7 +387,6 @@ async function scrapeCategory(cat, cache, seenThisRun, coldStart, coldStartBudge
         : (detection.type === 'new' && coldStartBudget.remaining > 0);
 
       if (shouldPost) {
-        detection.product._cacheRef = cache.items[detection.product.id];
         await enrichProduct(detection.product);
         await postToDiscord(detection.product, detection.type);
         if (coldStart) coldStartBudget.remaining--;
