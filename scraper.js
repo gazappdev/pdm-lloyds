@@ -51,7 +51,7 @@ async function sendMonitor(content) {
 async function sendStartStop(status) {
   const symbol = status === 'start' ? '🟢' : '🛑';
   const text   = status === 'start' ? 'Bot started' : 'Bot stopping';
-  await sendMonitor(`**Lloyds Pharmacy PDM** — ${symbol} ${text} ${formatUK()}`);
+  await sendMonitor(`**Lloyds, Boots & Entertainer PDM** — ${symbol} ${text} ${formatUK()}`);
 }
 
 // ===== SCAN SUMMARY =====
@@ -177,7 +177,7 @@ runLoop().catch(err => {
 // Hourly heartbeat
 cron.schedule('0 * * * *', async () => {
   await sendMonitor(
-    `**Lloyds Pharmacy PDM** — Online ${new Date().toLocaleTimeString('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit' })}`
+    `**Lloyds, Boots & Entertainer PDM** — Online ${new Date().toLocaleTimeString('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit' })}`
   ).catch(() => {});
 }, { timezone: 'Europe/London' });
 
