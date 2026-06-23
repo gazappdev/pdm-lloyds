@@ -1,6 +1,6 @@
 'use strict';
 
-// Historical probe script — runs 1-9 used to reverse-engineer Boots WCS API.
+// Historical probe script — runs 1-11 used to reverse-engineer Boots WCS API.
 // Key findings:
 //   Platform:         IBM WebSphere Commerce. storeId=11352, catalogId=28501.
 //   Category API:     /search/resources/store/11352/productview/byCategory/{numericId}
@@ -8,29 +8,22 @@
 //   Prices:           Display/L = current sale price, Offer/I = was/normal price
 //   Product URL:      sKUs[0].seo_token_ntk.split(';')[0] from search byId endpoint
 //   Images:           https://boots.scene7.com/is/image/Boots/{partNumber}
-//   Incapsula:        blocks HTML + text category slugs; numeric IDs on /search/resources bypass it
-//   Category IDs:
-//     Skincare Savings   2608697   (beauty & skincare → skincare → skincare savings)
-//     Toiletries Offers  1595059   (toiletries → toiletries offers)
-//     Fragrance Offers   1595046   (fragrance → fragrance offers)
-//     Electrical Offers  1595111   (electrical → electrical offers)
-//     Hair               1595040   (beauty & skincare → hair)
-//
-// Probe 10 findings:
-//   /tuesday-offer is NOT a standard WCS category (byIdentifier returns empty).
-//   It is a CMS/marketing page — no numeric ID at the top level.
-//   1590591 ("Shop by department") children are top-level departments, no Tuesday there.
+//   Incapsula:        blocks HTML + non-numeric-ID paths; numeric IDs on /search/resources bypass it
+//   Category IDs found:
+//     Skincare Savings   2608697
+//     Toiletries Offers  1595059
+//     Fragrance Offers   1595046
+//     Electrical Offers  1595111
+//     Hair               1595040
+//   /tuesday-offer is NOT a WCS category (byIdentifier = 0 results, not in level-1 or level-2 tree)
 //
 // To run new diagnostics: update this file and set TEST_BOOTS=1 on Bisect.
 
-// ===== PROBE 11: Deep scan for Tuesday Offer + product breadcrumb extraction =====
-// Goal: determine what API backs /tuesday-offer — either a deep nested category,
-//       a promotions endpoint, or a product attribute filter.
-// Strategy:
-//   1. Scan all level-2 children of 1590591 to find any Tuesday sub-category
-//   2. Try product text search for "tuesday" and read category breadcrumbs
-//   3. Try WCS eSpot API and promotion REST endpoints
-//   4. Fetch first product listed on the page via the criteria.* search pattern
+// ===== PROBE 12: Find tree root + siblings of 1590591 + JS bundle probe =====
+// Goal: find if there is a separate "Offers/Deals/Promotions" branch at the top level
+//       that contains Tuesday Offer, separate from "Shop by department" (1590591).
+// Also: probe boots.com JS bundle URLs (likely on a CDN, not Incapsula-blocked)
+//       to find what WCS query parameters the /tuesday-offer page component uses.
 
 const STORE_ID   = '11352';
 const CATALOG_ID = '28501';
@@ -44,182 +37,128 @@ const HEADERS    = {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-async function getChildren(parentId) {
-  const url = `${BASE}/categoryview/byParentCategory/${parentId}?responseFormat=json&catalogId=${CATALOG_ID}`;
+async function tryParent(id) {
+  const url = `${BASE}/categoryview/byParentCategory/${id}?responseFormat=json&catalogId=${CATALOG_ID}`;
   const res = await fetch(url, { headers: HEADERS });
-  if (!res.ok) return [];
-  const data = await res.json();
-  return (data.catalogGroupView || []).map(c => ({
-    id:   c.uniqueID,
-    name: (c.name || '').trim(),
-    seo:  (c.seo_token_ntk || '').trim(),
-  }));
+  const body = await res.text();
+  if (!body.trimStart().startsWith('{')) return null;
+  try {
+    const d = JSON.parse(body);
+    return d.catalogGroupView || null;
+  } catch { return null; }
 }
 
-async function probe11() {
-  console.log('\n===== PROBE 11: Deep scan for Tuesday Offer =====\n');
+async function probe12() {
+  console.log('\n===== PROBE 12: Tree root hunt + JS bundle probe =====\n');
 
-  // --- Step 1: Level-2 scan — children of each child of 1590591 ---
-  console.log('--- Step 1: Level-2 scan under 1590591 ---');
-  const level1 = [
-    { id: '2624680', name: 'love island' },
-    { id: '2596184', name: 'trending on social' },
-    { id: '1595022', name: 'sun & holiday' },
-    { id: '1860697', name: 'wellness' },
-    { id: '1923680', name: 'clearance' },
-    { id: '1595014', name: 'health & pharmacy' },
-    { id: '1595015', name: 'beauty & skincare' },
-    { id: '1595016', name: 'fragrance' },
-    { id: '1595017', name: 'baby & child' },
-    { id: '1595019', name: 'electrical' },
-    { id: '2640183', name: 'new in' },
-    { id: '1595018', name: 'toiletries' },
-    { id: '1933680', name: 'men\'s' },
-    { id: '3257682', name: 'homeware' },
-    { id: '1595023', name: 'gift' },
-  ];
-
-  let foundTuesday = null;
-  for (const parent of level1) {
-    const children = await getChildren(parent.id);
-    const tuesdayHit = children.find(c =>
-      c.name.toLowerCase().includes('tuesday') || c.seo.toLowerCase().includes('tuesday')
-    );
-    if (tuesdayHit) {
-      console.log(`*** TUESDAY FOUND under "${parent.name}" (${parent.id}) ***`);
-      console.log(`    ID: ${tuesdayHit.id}  name: "${tuesdayHit.name}"  seo: ${tuesdayHit.seo}`);
-      foundTuesday = tuesdayHit;
-    } else if (children.length > 0) {
-      // Print offer-sounding children only
-      const offerKids = children.filter(c =>
-        /offer|deal|sale|promo|saving|discount|tuesday|week|daily/i.test(c.name)
-      );
-      if (offerKids.length) {
-        console.log(`  "${parent.name}" offer-related children:`);
-        offerKids.forEach(c => console.log(`    ${c.id}: "${c.name}" [${c.seo}]`));
-      }
-    }
-    await sleep(200);
+  // --- Step 1: Probe candidate root/parent IDs for the Boots category tree ---
+  // We know 1590591 = "Shop by department". If its parent exists, siblings might
+  // include an "Offers" or "Deals" section containing Tuesday Offer.
+  console.log('--- Step 1: Probe candidate root / parent IDs ---');
+  const candidates = [0, 1, 10, 100, 1000, 10000, 100000, 11352, 28501,
+                      1590590, 1590592, 1595000, 1595010, 1595011, 1595012, 1595013,
+                      1595020, 1595021, 1595024, 1595025, 1595026, 1595027, 1595028,
+                      1595029, 1595030, 1595100, 1590000, 1600000];
+  for (const id of candidates) {
+    const kids = await tryParent(id);
+    if (kids === null) { process.stdout.write('.'); continue; }
+    if (kids.length === 0) { process.stdout.write('o'); continue; }
+    const names = kids.map(c => `${c.uniqueID}="${(c.name||'').trim()}"`).join(', ');
+    const hasTuesday = names.toLowerCase().includes('tuesday');
+    const marker = hasTuesday ? '*** TUESDAY ***' : '';
+    console.log(`\n  Parent ${id} → ${kids.length} children: ${names} ${marker}`);
+    await sleep(150);
   }
+  console.log('\n');
 
-  if (!foundTuesday) {
-    console.log('\n(Tuesday not found in level-2 — not a nested category)');
-  }
-
-  // --- Step 2: Product text search for "tuesday" — read breadcrumbs ---
-  console.log('\n--- Step 2: Product search breadcrumbs for "tuesday offer" ---');
-  const searchUrl = `${BASE}/productview/bySearchTerm/tuesday%20offer?responseFormat=json&pageNumber=1&pageSize=3&catalogId=${CATALOG_ID}`;
+  // --- Step 2: Try bySearchTerm with a real short term and dump ALL facets ---
+  // Step 6 in probe 11 returned empty facets from wildcard — try a real term.
+  console.log('\n--- Step 2: Facets from a real product search ---');
+  const searchUrl = `${BASE}/productview/bySearchTerm/lipstick?responseFormat=json&pageSize=1&pageNumber=1&catalogId=${CATALOG_ID}`;
   const searchRes = await fetch(searchUrl, { headers: HEADERS });
-  console.log(`Search HTTP: ${searchRes.status}`);
-  if (searchRes.ok) {
-    const d = await searchRes.json();
-    console.log('Total results:', d.recordSetTotal);
-    console.log('Breadcrumbs:', JSON.stringify(d.breadCrumbTrailEntryView || []));
-    const catFacet = (d.facets || []).find(f => f.name?.toLowerCase() === 'category');
-    if (catFacet) console.log('Category facet entries:', JSON.stringify(catFacet.entry?.slice(0, 10)));
-    // Print first product's categories
-    const p = (d.catalogEntryView || [])[0];
-    if (p) console.log('First product partNum:', p.partNumber, 'name:', p.shortDescription);
+  const searchBody = await searchRes.text();
+  if (searchBody.trimStart().startsWith('{')) {
+    const d = JSON.parse(searchBody);
+    console.log('Total:', d.recordSetTotal);
+    for (const f of (d.facets || [])) {
+      const entries = (f.entry || []).map(e => e.label || e.value).join(', ');
+      console.log(`  Facet "${f.name}": ${entries.slice(0, 200)}`);
+    }
+  } else {
+    console.log('Blocked/HTML');
   }
-  await sleep(400);
+  await sleep(300);
 
-  // --- Step 3: Try WCS eSpot (e-marketing spot) for tuesday page ---
-  // WCS eSpot REST paths vary by install — try multiple patterns.
-  // Previously /spot/activity/ returned HTML (wrong path).
-  console.log('\n--- Step 3: eSpot lookup for "tuesday-offer" ---');
-  const espotPatterns = [
-    `${BASE}/espot/tuesday-offer`,
-    `${BASE}/espot/byName/tuesday-offer`,
-    `https://www.boots.com/wcs/resources/store/${STORE_ID}/espot/tuesday-offer`,
-    `https://www.boots.com/wcs/resources/store/${STORE_ID}/spot/activity/tuesday-offer`,
-    `https://www.boots.com/webapp/wcs/stores/servlet/GetProductsForCategory?categoryId=tuesday-offer&storeId=${STORE_ID}&catalogId=${CATALOG_ID}&responseFormat=json`,
-  ];
-  for (const url of espotPatterns) {
+  // --- Step 3: Try to detect Tuesday Offer category via byIdentifier with variants ---
+  console.log('\n--- Step 3: byIdentifier with more slug variants ---');
+  const slugs = ['tuesday-offer', 'tuesday', 'tuesdayoffer', 'tuesday_offer',
+                 'TuesdayOffer', 'TUESDAY', 'offers', 'deals', 'weekly-offers',
+                 'weekly-deals', 'boots-offers', 'value', 'pharmacy-offers'];
+  for (const slug of slugs) {
+    const url = `${BASE}/categoryview/byIdentifier?identifier=${encodeURIComponent(slug)}&responseFormat=json&catalogId=${CATALOG_ID}`;
     const res = await fetch(url, { headers: HEADERS });
+    const body = await res.text();
+    if (body.trimStart().startsWith('{')) {
+      const d = JSON.parse(body);
+      if (d.recordSetTotal > 0) {
+        const cat = d.catalogGroupView[0];
+        console.log(`*** HIT "${slug}": ID=${cat.uniqueID} name="${cat.name}" ***`);
+      } else {
+        process.stdout.write('.');
+      }
+    } else {
+      process.stdout.write('X');
+    }
+    await sleep(150);
+  }
+  console.log();
+  await sleep(200);
+
+  // --- Step 4: Try to access boots.com JS bundle for Tuesday page component ---
+  // React SPAs bundle their page-component configs. If the JS bundle is on a CDN
+  // that bypasses Incapsula, we can search it for "tuesday-offer" query params.
+  console.log('\n--- Step 4: Probe known boots.com JS bundle paths ---');
+  const jsPaths = [
+    'https://www.boots.com/_next/static/chunks/pages/tuesday-offer.js',
+    'https://www.boots.com/_next/static/chunks/tuesday.js',
+    'https://static.boots.com/resource/boots/js/app.js',
+    'https://www.boots.com/ResourceServlet/wcsstore/BootsStorefrontAssetStore/javascript/boots-app.js',
+  ];
+  for (const url of jsPaths) {
+    const res = await fetch(url, { headers: { 'User-Agent': HEADERS['User-Agent'] } });
     const ct = res.headers.get('content-type') || '';
     const body = await res.text();
-    const isJson = ct.includes('json') || body.trimStart().startsWith('{') || body.trimStart().startsWith('[');
-    console.log(`[${res.status}] ${url.replace('https://www.boots.com', '')}`);
-    if (isJson) {
-      try { console.log('  JSON:', JSON.stringify(JSON.parse(body)).slice(0, 400)); } catch { console.log('  body:', body.slice(0, 200)); }
-    } else {
-      console.log(`  HTML/other (${ct}), first 100 chars:`, body.slice(0, 100).replace(/\s+/g, ' '));
-    }
-    await sleep(200);
-  }
-
-  // --- Step 4: Try byCategory with the SEO slug as the ID directly ---
-  console.log('\n--- Step 4: Try productview/byCategory with slug-style identifiers ---');
-  for (const id of ['tuesday-offer', 'tuesdayoffer']) {
-    const url = `${BASE}/productview/byCategory/${id}?responseFormat=json&pageNumber=1&pageSize=3&catalogId=${CATALOG_ID}`;
-    const res = await fetch(url, { headers: HEADERS });
-    const ct4 = res.headers.get('content-type') || '';
-    const body4 = await res.text();
-    const isJson4 = ct4.includes('json') || body4.trimStart().startsWith('{');
-    console.log(`byCategory "${id}": HTTP ${res.status} (${isJson4 ? 'json' : 'html'})`);
-    if (isJson4) {
-      try {
-        const d = JSON.parse(body4);
-        console.log('Total:', d.recordSetTotal, 'breadcrumbs:', JSON.stringify(d.breadCrumbTrailEntryView || []));
-      } catch { console.log('parse err'); }
-    } else {
-      console.log('  first 100:', body4.slice(0, 100).replace(/\s+/g, ' '));
-    }
-    await sleep(200);
-  }
-
-  // --- Step 5: criteria-based search with facet=category:tuesday-offer ---
-  console.log('\n--- Step 5: criteria-based product search (mimics page URL params) ---');
-  const criteriaUrl = `${BASE}/productview/bySearchTerm/*?searchTerm=*&intent=&pageSize=5&pageNumber=1&responseFormat=json&catalogId=${CATALOG_ID}&facet=category%3Atuesday-offer`;
-  const criteriaRes = await fetch(criteriaUrl, { headers: HEADERS });
-  const ct5 = criteriaRes.headers.get('content-type') || '';
-  const body5 = await criteriaRes.text();
-  console.log(`Criteria search HTTP: ${criteriaRes.status} (${ct5})`);
-  if (ct5.includes('json') || body5.trimStart().startsWith('{')) {
-    try {
-      const d = JSON.parse(body5);
-      console.log('Total:', d.recordSetTotal, 'breadcrumbs:', JSON.stringify(d.breadCrumbTrailEntryView || []));
-    } catch { console.log('parse err'); }
-  } else {
-    console.log('  first 100:', body5.slice(0, 100).replace(/\s+/g, ' '));
-  }
-
-  // --- Step 6: All-product search — dump facet names to see if "tuesday" appears as a facet ---
-  console.log('\n--- Step 6: Dump all facet names from wildcard search ---');
-  const facetUrl = `${BASE}/productview/bySearchTerm/*?searchTerm=*&pageSize=1&pageNumber=1&responseFormat=json&catalogId=${CATALOG_ID}`;
-  const facetRes = await fetch(facetUrl, { headers: HEADERS });
-  const body6 = await facetRes.text();
-  console.log(`Facet search HTTP: ${facetRes.status}`);
-  if (body6.trimStart().startsWith('{')) {
-    try {
-      const d = JSON.parse(body6);
-      const facetNames = (d.facets || []).map(f => `${f.name} (${(f.entry || []).length} entries)`);
-      console.log('Facet names:', facetNames.join(', '));
-      for (const f of (d.facets || [])) {
-        if (/offer|promo|deal|tuesday|discount/i.test(f.name)) {
-          console.log(`  Facet "${f.name}" entries:`, JSON.stringify((f.entry || []).slice(0, 20)));
-        }
+    console.log(`[${res.status}] ${url.split('/').slice(-2).join('/')} (${ct})`);
+    if (res.ok && (ct.includes('javascript') || ct.includes('text'))) {
+      // search for tuesday-related params
+      const idx = body.toLowerCase().indexOf('tuesday');
+      if (idx >= 0) {
+        console.log(`  *** "tuesday" found at pos ${idx}: ...${body.slice(Math.max(0,idx-50), idx+200)}...`);
+      } else {
+        console.log('  (no "tuesday" string in bundle)');
       }
-    } catch { console.log('parse err'); }
-  } else {
-    console.log('  first 100:', body6.slice(0, 100).replace(/\s+/g, ' '));
+    }
+    await sleep(200);
   }
 
-  // --- Step 7: Fetch /tuesday-offer page itself and look at redirect or headers ---
-  console.log('\n--- Step 7: HEAD /tuesday-offer to see redirect/headers ---');
-  const pageRes = await fetch('https://www.boots.com/tuesday-offer?criteria.inStock=true', {
-    method: 'HEAD',
-    headers: { ...HEADERS, 'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8' },
-    redirect: 'manual',
-  });
-  console.log(`HEAD /tuesday-offer: HTTP ${pageRes.status}`);
-  console.log('Location header:', pageRes.headers.get('location'));
-  console.log('Content-Type:', pageRes.headers.get('content-type'));
-  for (const [k, v] of pageRes.headers.entries()) {
-    if (/x-|cf-|incap|set-cookie/i.test(k)) console.log(`  ${k}: ${v.slice(0, 80)}`);
+  // --- Step 5: Check boots.com Next.js build ID (to get correct bundle names) ---
+  console.log('\n--- Step 5: Try boots.com Next.js manifest for bundle names ---');
+  const manifestUrls = [
+    'https://www.boots.com/_next/static/chunks/webpack.js',
+    'https://www.boots.com/_next/static/webpack/webpack.hot-update.json',
+    'https://www.boots.com/api/health',
+    'https://www.boots.com/_next/data/health.json',
+  ];
+  for (const url of manifestUrls) {
+    const res = await fetch(url, { headers: { 'User-Agent': HEADERS['User-Agent'] } });
+    const ct = res.headers.get('content-type') || '';
+    const body = await res.text();
+    console.log(`[${res.status}] ${url.split('/').slice(-2).join('/')} (${ct})`);
+    if (res.ok && body.length < 5000) console.log('  body:', body.slice(0, 300));
+    await sleep(200);
   }
 }
 
-probe11()
-  .then(() => { console.log('\nProbe 11 complete.'); process.exit(0); })
-  .catch(e => { console.error('Probe 11 error:', e); process.exit(1); });
+probe12()
+  .then(() => { console.log('\nProbe 12 complete.'); process.exit(0); })
+  .catch(e => { console.error('Probe 12 error:', e); process.exit(1); });
