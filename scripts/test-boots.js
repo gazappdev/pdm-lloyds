@@ -153,39 +153,56 @@ async function probe11() {
   for (const id of ['tuesday-offer', 'tuesdayoffer']) {
     const url = `${BASE}/productview/byCategory/${id}?responseFormat=json&pageNumber=1&pageSize=3&catalogId=${CATALOG_ID}`;
     const res = await fetch(url, { headers: HEADERS });
-    console.log(`byCategory "${id}": HTTP ${res.status}`);
-    if (res.ok) {
-      const d = await res.json();
-      console.log('Total:', d.recordSetTotal, 'breadcrumbs:', JSON.stringify(d.breadCrumbTrailEntryView || []));
+    const ct4 = res.headers.get('content-type') || '';
+    const body4 = await res.text();
+    const isJson4 = ct4.includes('json') || body4.trimStart().startsWith('{');
+    console.log(`byCategory "${id}": HTTP ${res.status} (${isJson4 ? 'json' : 'html'})`);
+    if (isJson4) {
+      try {
+        const d = JSON.parse(body4);
+        console.log('Total:', d.recordSetTotal, 'breadcrumbs:', JSON.stringify(d.breadCrumbTrailEntryView || []));
+      } catch { console.log('parse err'); }
+    } else {
+      console.log('  first 100:', body4.slice(0, 100).replace(/\s+/g, ' '));
     }
     await sleep(200);
   }
 
-  // --- Step 5: Try the criteria-based search endpoint WCS uses for /tuesday-offer ---
+  // --- Step 5: criteria-based search with facet=category:tuesday-offer ---
   console.log('\n--- Step 5: criteria-based product search (mimics page URL params) ---');
   const criteriaUrl = `${BASE}/productview/bySearchTerm/*?searchTerm=*&intent=&pageSize=5&pageNumber=1&responseFormat=json&catalogId=${CATALOG_ID}&facet=category%3Atuesday-offer`;
   const criteriaRes = await fetch(criteriaUrl, { headers: HEADERS });
-  console.log(`Criteria search HTTP: ${criteriaRes.status}`);
-  if (criteriaRes.ok) {
-    const d = await criteriaRes.json();
-    console.log('Total:', d.recordSetTotal, 'breadcrumbs:', JSON.stringify(d.breadCrumbTrailEntryView || []));
+  const ct5 = criteriaRes.headers.get('content-type') || '';
+  const body5 = await criteriaRes.text();
+  console.log(`Criteria search HTTP: ${criteriaRes.status} (${ct5})`);
+  if (ct5.includes('json') || body5.trimStart().startsWith('{')) {
+    try {
+      const d = JSON.parse(body5);
+      console.log('Total:', d.recordSetTotal, 'breadcrumbs:', JSON.stringify(d.breadCrumbTrailEntryView || []));
+    } catch { console.log('parse err'); }
+  } else {
+    console.log('  first 100:', body5.slice(0, 100).replace(/\s+/g, ' '));
   }
 
   // --- Step 6: All-product search — dump facet names to see if "tuesday" appears as a facet ---
   console.log('\n--- Step 6: Dump all facet names from wildcard search ---');
   const facetUrl = `${BASE}/productview/bySearchTerm/*?searchTerm=*&pageSize=1&pageNumber=1&responseFormat=json&catalogId=${CATALOG_ID}`;
   const facetRes = await fetch(facetUrl, { headers: HEADERS });
+  const body6 = await facetRes.text();
   console.log(`Facet search HTTP: ${facetRes.status}`);
-  if (facetRes.ok) {
-    const d = await facetRes.json();
-    const facetNames = (d.facets || []).map(f => `${f.name} (${(f.entry || []).length} entries)`);
-    console.log('Facet names:', facetNames.join(', '));
-    // Print all entries for any facet mentioning offer/promo/deal
-    for (const f of (d.facets || [])) {
-      if (/offer|promo|deal|tuesday|discount/i.test(f.name)) {
-        console.log(`  Facet "${f.name}" entries:`, JSON.stringify((f.entry || []).slice(0, 20)));
+  if (body6.trimStart().startsWith('{')) {
+    try {
+      const d = JSON.parse(body6);
+      const facetNames = (d.facets || []).map(f => `${f.name} (${(f.entry || []).length} entries)`);
+      console.log('Facet names:', facetNames.join(', '));
+      for (const f of (d.facets || [])) {
+        if (/offer|promo|deal|tuesday|discount/i.test(f.name)) {
+          console.log(`  Facet "${f.name}" entries:`, JSON.stringify((f.entry || []).slice(0, 20)));
+        }
       }
-    }
+    } catch { console.log('parse err'); }
+  } else {
+    console.log('  first 100:', body6.slice(0, 100).replace(/\s+/g, ' '));
   }
 
   // --- Step 7: Fetch /tuesday-offer page itself and look at redirect or headers ---
