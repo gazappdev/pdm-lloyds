@@ -124,14 +124,26 @@ async function probe11() {
   await sleep(400);
 
   // --- Step 3: Try WCS eSpot (e-marketing spot) for tuesday page ---
+  // WCS eSpot REST paths vary by install — try multiple patterns.
+  // Previously /spot/activity/ returned HTML (wrong path).
   console.log('\n--- Step 3: eSpot lookup for "tuesday-offer" ---');
-  for (const spotName of ['tuesday-offer', 'TuesdayOffer', 'TUESDAY_OFFER', 'tuesday_offer']) {
-    const espotUrl = `${BASE}/spot/activity/${encodeURIComponent(spotName)}?responseFormat=json&catalogId=${CATALOG_ID}`;
-    const espotRes = await fetch(espotUrl, { headers: HEADERS });
-    console.log(`eSpot "${spotName}": HTTP ${espotRes.status}`);
-    if (espotRes.ok) {
-      const d = await espotRes.json();
-      console.log('eSpot result:', JSON.stringify(d).slice(0, 600));
+  const espotPatterns = [
+    `${BASE}/espot/tuesday-offer`,
+    `${BASE}/espot/byName/tuesday-offer`,
+    `https://www.boots.com/wcs/resources/store/${STORE_ID}/espot/tuesday-offer`,
+    `https://www.boots.com/wcs/resources/store/${STORE_ID}/spot/activity/tuesday-offer`,
+    `https://www.boots.com/webapp/wcs/stores/servlet/GetProductsForCategory?categoryId=tuesday-offer&storeId=${STORE_ID}&catalogId=${CATALOG_ID}&responseFormat=json`,
+  ];
+  for (const url of espotPatterns) {
+    const res = await fetch(url, { headers: HEADERS });
+    const ct = res.headers.get('content-type') || '';
+    const body = await res.text();
+    const isJson = ct.includes('json') || body.trimStart().startsWith('{') || body.trimStart().startsWith('[');
+    console.log(`[${res.status}] ${url.replace('https://www.boots.com', '')}`);
+    if (isJson) {
+      try { console.log('  JSON:', JSON.stringify(JSON.parse(body)).slice(0, 400)); } catch { console.log('  body:', body.slice(0, 200)); }
+    } else {
+      console.log(`  HTML/other (${ct}), first 100 chars:`, body.slice(0, 100).replace(/\s+/g, ' '));
     }
     await sleep(200);
   }
@@ -157,6 +169,37 @@ async function probe11() {
   if (criteriaRes.ok) {
     const d = await criteriaRes.json();
     console.log('Total:', d.recordSetTotal, 'breadcrumbs:', JSON.stringify(d.breadCrumbTrailEntryView || []));
+  }
+
+  // --- Step 6: All-product search — dump facet names to see if "tuesday" appears as a facet ---
+  console.log('\n--- Step 6: Dump all facet names from wildcard search ---');
+  const facetUrl = `${BASE}/productview/bySearchTerm/*?searchTerm=*&pageSize=1&pageNumber=1&responseFormat=json&catalogId=${CATALOG_ID}`;
+  const facetRes = await fetch(facetUrl, { headers: HEADERS });
+  console.log(`Facet search HTTP: ${facetRes.status}`);
+  if (facetRes.ok) {
+    const d = await facetRes.json();
+    const facetNames = (d.facets || []).map(f => `${f.name} (${(f.entry || []).length} entries)`);
+    console.log('Facet names:', facetNames.join(', '));
+    // Print all entries for any facet mentioning offer/promo/deal
+    for (const f of (d.facets || [])) {
+      if (/offer|promo|deal|tuesday|discount/i.test(f.name)) {
+        console.log(`  Facet "${f.name}" entries:`, JSON.stringify((f.entry || []).slice(0, 20)));
+      }
+    }
+  }
+
+  // --- Step 7: Fetch /tuesday-offer page itself and look at redirect or headers ---
+  console.log('\n--- Step 7: HEAD /tuesday-offer to see redirect/headers ---');
+  const pageRes = await fetch('https://www.boots.com/tuesday-offer?criteria.inStock=true', {
+    method: 'HEAD',
+    headers: { ...HEADERS, 'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8' },
+    redirect: 'manual',
+  });
+  console.log(`HEAD /tuesday-offer: HTTP ${pageRes.status}`);
+  console.log('Location header:', pageRes.headers.get('location'));
+  console.log('Content-Type:', pageRes.headers.get('content-type'));
+  for (const [k, v] of pageRes.headers.entries()) {
+    if (/x-|cf-|incap|set-cookie/i.test(k)) console.log(`  ${k}: ${v.slice(0, 80)}`);
   }
 }
 
