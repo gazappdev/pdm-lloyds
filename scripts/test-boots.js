@@ -16,14 +16,21 @@
 //     Electrical Offers  1595111   (electrical → electrical offers)
 //     Hair               1595040   (beauty & skincare → hair)
 //
+// Probe 10 findings:
+//   /tuesday-offer is NOT a standard WCS category (byIdentifier returns empty).
+//   It is a CMS/marketing page — no numeric ID at the top level.
+//   1590591 ("Shop by department") children are top-level departments, no Tuesday there.
+//
 // To run new diagnostics: update this file and set TEST_BOOTS=1 on Bisect.
 
-// ===== PROBE 10: Find numeric category ID for /tuesday-offer =====
-// Goal: locate the WCS category ID for the weekly "£10 Tuesdays" promotion page.
+// ===== PROBE 11: Deep scan for Tuesday Offer + product breadcrumb extraction =====
+// Goal: determine what API backs /tuesday-offer — either a deep nested category,
+//       a promotions endpoint, or a product attribute filter.
 // Strategy:
-//   1. Try byIdentifier lookup using the URL slug "tuesday-offer"
-//   2. Scan children of all known parent categories for anything Tuesday-related
-//   3. Fetch one product from the /tuesday-offer page via product search to read its category breadcrumbs
+//   1. Scan all level-2 children of 1590591 to find any Tuesday sub-category
+//   2. Try product text search for "tuesday" and read category breadcrumbs
+//   3. Try WCS eSpot API and promotion REST endpoints
+//   4. Fetch first product listed on the page via the criteria.* search pattern
 
 const STORE_ID   = '11352';
 const CATALOG_ID = '28501';
@@ -40,7 +47,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function getChildren(parentId) {
   const url = `${BASE}/categoryview/byParentCategory/${parentId}?responseFormat=json&catalogId=${CATALOG_ID}`;
   const res = await fetch(url, { headers: HEADERS });
-  if (!res.ok) { console.log(`  HTTP ${res.status} for parent ${parentId}`); return []; }
+  if (!res.ok) return [];
   const data = await res.json();
   return (data.catalogGroupView || []).map(c => ({
     id:   c.uniqueID,
@@ -49,74 +56,110 @@ async function getChildren(parentId) {
   }));
 }
 
-async function probe10() {
-  console.log('\n===== PROBE 10: Tuesday Offer category lookup =====\n');
+async function probe11() {
+  console.log('\n===== PROBE 11: Deep scan for Tuesday Offer =====\n');
 
-  // --- Step 1: byIdentifier lookup ---
-  console.log('--- Step 1: byIdentifier lookup for "tuesday-offer" ---');
-  const identUrl = `${BASE}/categoryview/byIdentifier?identifier=tuesday-offer&responseFormat=json&catalogId=${CATALOG_ID}`;
-  const identRes = await fetch(identUrl, { headers: HEADERS });
-  console.log(`byIdentifier HTTP: ${identRes.status}`);
-  if (identRes.ok) {
-    const d = await identRes.json();
-    console.log('Result:', JSON.stringify(d).slice(0, 800));
-  }
-  await sleep(500);
-
-  // --- Step 2: scan known parent categories and their children ---
-  // Known parent IDs from previous probes plus some guesses for promotions
-  const parentsToScan = [
-    { id: '1590591', label: 'Shop by department (known)' },
-    { id: '1595059', label: 'Toiletries Offers (known — scan siblings via its parent)' },
-    // Try common WCS promotion/offers root IDs
-    { id: '10052',   label: 'Possible root' },
-    { id: '10702',   label: 'Possible offers root' },
-    { id: '1594972', label: 'Possible promotions' },
+  // --- Step 1: Level-2 scan — children of each child of 1590591 ---
+  console.log('--- Step 1: Level-2 scan under 1590591 ---');
+  const level1 = [
+    { id: '2624680', name: 'love island' },
+    { id: '2596184', name: 'trending on social' },
+    { id: '1595022', name: 'sun & holiday' },
+    { id: '1860697', name: 'wellness' },
+    { id: '1923680', name: 'clearance' },
+    { id: '1595014', name: 'health & pharmacy' },
+    { id: '1595015', name: 'beauty & skincare' },
+    { id: '1595016', name: 'fragrance' },
+    { id: '1595017', name: 'baby & child' },
+    { id: '1595019', name: 'electrical' },
+    { id: '2640183', name: 'new in' },
+    { id: '1595018', name: 'toiletries' },
+    { id: '1933680', name: 'men\'s' },
+    { id: '3257682', name: 'homeware' },
+    { id: '1595023', name: 'gift' },
   ];
 
-  console.log('\n--- Step 2: scan children of known/candidate parents ---');
-  for (const parent of parentsToScan) {
-    console.log(`\nChildren of ${parent.id} (${parent.label}):`);
+  let foundTuesday = null;
+  for (const parent of level1) {
     const children = await getChildren(parent.id);
-    if (children.length === 0) { console.log('  (none / not found)'); }
-    for (const c of children) {
-      const flag = (c.name.toLowerCase().includes('tuesday') || c.seo.toLowerCase().includes('tuesday'))
-        ? ' <<<< TUESDAY FOUND'
-        : '';
-      console.log(`  ${c.id}: "${c.name}" [seo: ${c.seo}]${flag}`);
+    const tuesdayHit = children.find(c =>
+      c.name.toLowerCase().includes('tuesday') || c.seo.toLowerCase().includes('tuesday')
+    );
+    if (tuesdayHit) {
+      console.log(`*** TUESDAY FOUND under "${parent.name}" (${parent.id}) ***`);
+      console.log(`    ID: ${tuesdayHit.id}  name: "${tuesdayHit.name}"  seo: ${tuesdayHit.seo}`);
+      foundTuesday = tuesdayHit;
+    } else if (children.length > 0) {
+      // Print offer-sounding children only
+      const offerKids = children.filter(c =>
+        /offer|deal|sale|promo|saving|discount|tuesday|week|daily/i.test(c.name)
+      );
+      if (offerKids.length) {
+        console.log(`  "${parent.name}" offer-related children:`);
+        offerKids.forEach(c => console.log(`    ${c.id}: "${c.name}" [${c.seo}]`));
+      }
     }
-    await sleep(400);
+    await sleep(200);
   }
 
-  // --- Step 3: product search using the SEO slug to get breadcrumbs ---
-  console.log('\n--- Step 3: product search with facet/category filter for tuesday-offer ---');
-  // Try searching by the category SEO token directly in product search
-  const searchUrl = `${BASE}/productview/bySearchTerm/*?searchTerm=*&categoryId=tuesday-offer&responseFormat=json&pageNumber=1&pageSize=3&catalogId=${CATALOG_ID}`;
+  if (!foundTuesday) {
+    console.log('\n(Tuesday not found in level-2 — not a nested category)');
+  }
+
+  // --- Step 2: Product text search for "tuesday" — read breadcrumbs ---
+  console.log('\n--- Step 2: Product search breadcrumbs for "tuesday offer" ---');
+  const searchUrl = `${BASE}/productview/bySearchTerm/tuesday%20offer?responseFormat=json&pageNumber=1&pageSize=3&catalogId=${CATALOG_ID}`;
   const searchRes = await fetch(searchUrl, { headers: HEADERS });
-  console.log(`Product search (by seo slug) HTTP: ${searchRes.status}`);
+  console.log(`Search HTTP: ${searchRes.status}`);
   if (searchRes.ok) {
     const d = await searchRes.json();
-    console.log('breadcrumbs:', JSON.stringify(d.breadCrumbTrailEntryView || []).slice(0, 400));
-    console.log('facet categories:', JSON.stringify((d.facets || []).find(f => f.name === 'Category')).slice(0, 600));
+    console.log('Total results:', d.recordSetTotal);
+    console.log('Breadcrumbs:', JSON.stringify(d.breadCrumbTrailEntryView || []));
+    const catFacet = (d.facets || []).find(f => f.name?.toLowerCase() === 'category');
+    if (catFacet) console.log('Category facet entries:', JSON.stringify(catFacet.entry?.slice(0, 10)));
+    // Print first product's categories
+    const p = (d.catalogEntryView || [])[0];
+    if (p) console.log('First product partNum:', p.partNumber, 'name:', p.shortDescription);
   }
   await sleep(400);
 
-  // --- Step 4: try the top-level category tree to find any "Offers" root ---
-  console.log('\n--- Step 4: drill top-level to find offers/promotions branch ---');
-  // The WCS top-level catalog root is usually fetched with an empty/root parent
-  for (const rootGuess of ['10052', '10702', '10051', '10053']) {
-    const children = await getChildren(rootGuess);
-    if (children.length > 0) {
-      console.log(`\nRoot ${rootGuess} has ${children.length} children:`);
-      for (const c of children) {
-        console.log(`  ${c.id}: "${c.name}" [${c.seo}]`);
-      }
-      break;
+  // --- Step 3: Try WCS eSpot (e-marketing spot) for tuesday page ---
+  console.log('\n--- Step 3: eSpot lookup for "tuesday-offer" ---');
+  for (const spotName of ['tuesday-offer', 'TuesdayOffer', 'TUESDAY_OFFER', 'tuesday_offer']) {
+    const espotUrl = `${BASE}/spot/activity/${encodeURIComponent(spotName)}?responseFormat=json&catalogId=${CATALOG_ID}`;
+    const espotRes = await fetch(espotUrl, { headers: HEADERS });
+    console.log(`eSpot "${spotName}": HTTP ${espotRes.status}`);
+    if (espotRes.ok) {
+      const d = await espotRes.json();
+      console.log('eSpot result:', JSON.stringify(d).slice(0, 600));
     }
-    await sleep(300);
+    await sleep(200);
+  }
+
+  // --- Step 4: Try byCategory with the SEO slug as the ID directly ---
+  console.log('\n--- Step 4: Try productview/byCategory with slug-style identifiers ---');
+  for (const id of ['tuesday-offer', 'tuesdayoffer']) {
+    const url = `${BASE}/productview/byCategory/${id}?responseFormat=json&pageNumber=1&pageSize=3&catalogId=${CATALOG_ID}`;
+    const res = await fetch(url, { headers: HEADERS });
+    console.log(`byCategory "${id}": HTTP ${res.status}`);
+    if (res.ok) {
+      const d = await res.json();
+      console.log('Total:', d.recordSetTotal, 'breadcrumbs:', JSON.stringify(d.breadCrumbTrailEntryView || []));
+    }
+    await sleep(200);
+  }
+
+  // --- Step 5: Try the criteria-based search endpoint WCS uses for /tuesday-offer ---
+  console.log('\n--- Step 5: criteria-based product search (mimics page URL params) ---');
+  const criteriaUrl = `${BASE}/productview/bySearchTerm/*?searchTerm=*&intent=&pageSize=5&pageNumber=1&responseFormat=json&catalogId=${CATALOG_ID}&facet=category%3Atuesday-offer`;
+  const criteriaRes = await fetch(criteriaUrl, { headers: HEADERS });
+  console.log(`Criteria search HTTP: ${criteriaRes.status}`);
+  if (criteriaRes.ok) {
+    const d = await criteriaRes.json();
+    console.log('Total:', d.recordSetTotal, 'breadcrumbs:', JSON.stringify(d.breadCrumbTrailEntryView || []));
   }
 }
 
-probe10()
-  .then(() => { console.log('\nProbe 10 complete.'); process.exit(0); })
-  .catch(e => { console.error('Probe 10 error:', e); process.exit(1); });
+probe11()
+  .then(() => { console.log('\nProbe 11 complete.'); process.exit(0); })
+  .catch(e => { console.error('Probe 11 error:', e); process.exit(1); });
