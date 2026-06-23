@@ -64,14 +64,15 @@ async function postStoreSummary(stats, scanDurStr, delayMins, nextTimeFull) {
   // Only list categories with activity — listing all quietly-scanned collections
   // exceeds Discord's 4096-char embed description limit for large stores.
   const totalCats  = (stats.categorySummary || []).length;
-  const activeCats = (stats.categorySummary || []).filter(c => c.error || c.new || c.drops);
+  const activeCats = (stats.categorySummary || []).filter(c => c.error || c.new || c.drops || c.restocks);
   let catLines = '';
   if (activeCats.length > 0) {
     catLines = activeCats.map(c => {
       if (c.error) return '`' + c.label + '` ⚠️ error';
       const parts = [];
-      if (c.drops) parts.push(`📉 ${c.drops}`);
-      if (c.new)   parts.push(`🆕 ${c.new}`);
+      if (c.drops)    parts.push(`📉 ${c.drops}`);
+      if (c.new)      parts.push(`🆕 ${c.new}`);
+      if (c.restocks) parts.push(`🔄 ${c.restocks}`);
       return '`' + c.label + '`' + (parts.length ? ' — ' + parts.join('  ') : '');
     }).join('\n');
   }
@@ -82,6 +83,7 @@ async function postStoreSummary(stats, scanDurStr, delayMins, nextTimeFull) {
     `**📊 Unique products seen:** ${stats.uniqueSeen} across ${totalCats} categories\n` +
     `**🆕 New deals found:** ${stats.totNew}${stats.coldStart ? ` (${stats.coldStartPreviewSent} posted, rest cached silently)` : ''}\n` +
     `**📉 Price drops:** ${stats.totPriceDrops}\n` +
+    `**🔄 Restocks (silent):** ${stats.totRestocks}\n` +
     `**❌ OOS:** ${stats.totOos}\n` +
     `**💾 Total cached:** ${stats.totalCached}\n` +
     `**➡️ Sent to Discord:** ${stats.coldStart ? stats.coldStartPreviewSent : stats.totNew + stats.totPriceDrops}\n` +

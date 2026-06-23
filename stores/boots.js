@@ -173,7 +173,7 @@ function processProduct(p, cache, seenThisRun) {
 
   if (prev.status === 'oos') {
     cache.items[p.id] = { ...prev, ...p, ean: prev.ean || p.ean, status: 'active' };
-    return { type: null };
+    return { type: 'restock', product: cache.items[p.id] };
   }
 
   cache.items[p.id].name    = p.name;
@@ -332,7 +332,7 @@ async function postToDiscord(p, type) {
 // ===== CATEGORY SCRAPER =====
 async function scrapeCategory(cat, cache, seenThisRun, coldStart, coldStartBudget) {
   const { id, label } = cat;
-  let totNew = 0, totPriceDrops = 0, pagesScraped = 0, totSeen = 0;
+  let totNew = 0, totPriceDrops = 0, totRestocks = 0, pagesScraped = 0, totSeen = 0;
   let totalPages = 1;
 
   for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
@@ -361,6 +361,7 @@ async function scrapeCategory(cat, cache, seenThisRun, coldStart, coldStartBudge
       const detection = processProduct(p, cache, seenThisRun);
       if (detection.type === 'new')       totNew++;
       if (detection.type === 'priceDrop') totPriceDrops++;
+      if (detection.type === 'restock')   totRestocks++;
 
       const shouldPost = !coldStart
         ? (detection.type === 'new' || detection.type === 'priceDrop')
@@ -380,7 +381,7 @@ async function scrapeCategory(cat, cache, seenThisRun, coldStart, coldStartBudge
     saveCache(cache);
   }
 
-  return { totNew, totPriceDrops, pagesScraped, seen: totSeen };
+  return { totNew, totPriceDrops, totRestocks, pagesScraped, seen: totSeen };
 }
 
 // ===== MAIN SCAN =====
@@ -388,7 +389,7 @@ async function scan() {
   const cache       = loadCache();
   const coldStart   = Object.keys(cache.items).length === 0;
   const seenThisRun = new Set();
-  let totNew = 0, totPriceDrops = 0, totPages = 0;
+  let totNew = 0, totPriceDrops = 0, totRestocks = 0, totPages = 0;
   const categorySummary  = [];
   const coldStartBudget  = { remaining: COLD_START_PREVIEW_COUNT };
 
@@ -405,14 +406,16 @@ async function scan() {
     }
     totNew        += result.totNew;
     totPriceDrops += result.totPriceDrops;
+    totRestocks   += result.totRestocks || 0;
     totPages      += result.pagesScraped;
     categorySummary.push({
-      label: cat.label,
-      new:   result.totNew,
-      drops: result.totPriceDrops,
-      pages: result.pagesScraped,
-      seen:  result.seen,
-      error: result.error || false,
+      label:    cat.label,
+      new:      result.totNew,
+      drops:    result.totPriceDrops,
+      restocks: result.totRestocks || 0,
+      pages:    result.pagesScraped,
+      seen:     result.seen,
+      error:    result.error || false,
     });
   }
 
@@ -443,7 +446,7 @@ async function scan() {
     pagesScraped: totPages,
     totNew,
     totPriceDrops,
-    totRestocks:  0,
+    totRestocks,
     totOos,
     coldStart,
     coldStartPreviewSent: coldStart ? COLD_START_PREVIEW_COUNT - coldStartBudget.remaining : 0,

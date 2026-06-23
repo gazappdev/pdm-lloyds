@@ -223,7 +223,7 @@ function processProduct(p, cache, seenThisRun) {
 
   if (prev.status === 'oos') {
     cache.items[p.id] = { ...prev, ...p, ean: prev.ean || p.ean, status: 'active' };
-    return { type: null };
+    return { type: 'restock', product: cache.items[p.id] };
   }
 
   cache.items[p.id].name     = p.name;
@@ -415,7 +415,7 @@ async function postToDiscord(p, type) {
 
 // ===== CATEGORY SCRAPER =====
 async function scrapeCategory(handle, cache, seenThisRun, coldStart, coldStartBudget) {
-  let totNew = 0, totPriceDrops = 0, pagesScraped = 0, totSeen = 0;
+  let totNew = 0, totPriceDrops = 0, totRestocks = 0, pagesScraped = 0, totSeen = 0;
 
   console.log(`\n[${STORE_NAME}] Scanning: ${handle}${coldStart ? ` (cold start — ${coldStartBudget.remaining} preview posts remaining)` : ''}`);
 
@@ -437,6 +437,7 @@ async function scrapeCategory(handle, cache, seenThisRun, coldStart, coldStartBu
       const result = processProduct(p, cache, seenThisRun);
       if (result.type === 'new')       totNew++;
       if (result.type === 'priceDrop') totPriceDrops++;
+      if (result.type === 'restock')   totRestocks++;
       const shouldPost = !coldStart
         ? (result.type === 'new' || result.type === 'priceDrop')
         : (result.type === 'new' && coldStartBudget.remaining > 0);
@@ -459,7 +460,7 @@ async function scrapeCategory(handle, cache, seenThisRun, coldStart, coldStartBu
     if (products.length < 250) break;
   }
 
-  return { totNew, totPriceDrops, pagesScraped, seen: totSeen };
+  return { totNew, totPriceDrops, totRestocks, pagesScraped, seen: totSeen };
 }
 
 // ===== MAIN SCAN =====
@@ -467,7 +468,7 @@ async function scan() {
   const cache       = loadCache();
   const coldStart   = Object.keys(cache.items).length === 0;
   const seenThisRun = new Set();
-  let totNew = 0, totPriceDrops = 0, totPages = 0;
+  let totNew = 0, totPriceDrops = 0, totRestocks = 0, totPages = 0;
   const categorySummary = [];
 
   const coldStartBudget = { remaining: COLD_START_PREVIEW_COUNT };
@@ -491,13 +492,15 @@ async function scan() {
 
     totNew        += result.totNew;
     totPriceDrops += result.totPriceDrops;
+    totRestocks   += result.totRestocks || 0;
     totPages      += result.pagesScraped;
     categorySummary.push({
-      label: handle,
-      new:   result.totNew,
-      drops: result.totPriceDrops,
-      pages: result.pagesScraped,
-      seen:  result.seen,
+      label:    handle,
+      new:      result.totNew,
+      drops:    result.totPriceDrops,
+      restocks: result.totRestocks || 0,
+      pages:    result.pagesScraped,
+      seen:     result.seen,
     });
   }
 
@@ -528,7 +531,7 @@ async function scan() {
     pagesScraped: totPages,
     totNew,
     totPriceDrops,
-    totRestocks:  0,
+    totRestocks,
     totOos,
     coldStart,
     coldStartPreviewSent: coldStart ? COLD_START_PREVIEW_COUNT - coldStartBudget.remaining : 0,
