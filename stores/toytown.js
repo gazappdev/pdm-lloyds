@@ -106,8 +106,8 @@ function parseSalePage(html) {
     if (!urlMatch) continue;
     const productUrl = ORIGIN + urlMatch[1];
 
-    // Thumbnail → swap to medium for better quality in embeds
-    const imgMatch = seg.match(/src="(\/images\/[^"]+_thumb\.jpg)"/);
+    // Thumbnail — raw HTML uses a 1×1 GIF in src (lazy-load placeholder); real path is in data-src
+    const imgMatch = seg.match(/data-src="(\/images\/[^"]+_thumb\.jpg)"/);
     const imageUrl  = imgMatch ? ORIGIN + imgMatch[1].replace('_thumb.jpg', '_medium.jpg') : null;
 
     // Vendor reference (data-productreference) — overwritten by JSON-LD SKU on enrichment
@@ -134,13 +134,14 @@ function parseSalePage(html) {
     if (!name) continue;
 
     // Now price — inside prices__price--sale, take the first product-content__price--inc GBP value
-    const nowMatch = seg.match(/prices__price--sale[\s\S]+?product-content__price--inc[\s\S]+?class="GBP">\s*£([\d.]+)/);
+    // Note: server HTML puts class="GBP" and closing > on separate lines, so \s* between them
+    const nowMatch = seg.match(/prices__price--sale[\s\S]+?product-content__price--inc[\s\S]+?class="GBP"\s*>\s*£([\d.]+)/);
     if (!nowMatch) continue;
     const price = parseFloat(nowMatch[1]);
     if (isNaN(price)) continue;
 
     // Was price — inside prices__was
-    const wasMatch = seg.match(/prices__was[\s\S]+?product-content__price--inc[\s\S]+?class="GBP">\s*£([\d.]+)/);
+    const wasMatch = seg.match(/prices__was[\s\S]+?product-content__price--inc[\s\S]+?class="GBP"\s*>\s*£([\d.]+)/);
     const wasPrice = wasMatch ? parseFloat(wasMatch[1]) : null;
 
     // Skip full-price items (shouldn't appear on /sale, but guard anyway)
