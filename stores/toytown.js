@@ -49,6 +49,7 @@ function stripHtml(s) {
   return (s || '')
     .replace(/<[^>]+>/g, ' ')
     .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&apos;/g, "'")
     .replace(/\s+/g, ' ').trim();
 }
 
@@ -114,34 +115,39 @@ function parseSalePage(html) {
     const skuMatch = seg.match(/data-productreference="([^"]+)"/);
     const sku = skuMatch ? skuMatch[1] : '';
 
-    // Brand + name from the product__details__title section
+    // Brand + name from the product__details__title section.
+    // Window must be wide enough for long product URL slugs — the </a> can sit 700+ chars in.
     const detailsIdx = seg.indexOf('product__details__title');
     if (detailsIdx === -1) continue;
-    const detailsSeg = seg.slice(detailsIdx, detailsIdx + 700);
+    const detailsSeg = seg.slice(detailsIdx, detailsIdx + 1500);
 
     let brand = '';
     let name  = '';
-    // Branded products have <span>BRAND</span> then NAME text node inside the link
+    // Branded products: <span>BRAND</span> followed by NAME text node, both inside the link
     const spanMatch = detailsSeg.match(/<span>\s*([\s\S]+?)\s*<\/span>([\s\S]+?)<\/a>/);
     if (spanMatch) {
       brand = stripHtml(spanMatch[1]).trim();
       name  = stripHtml(spanMatch[2]).trim();
     } else {
-      // Non-branded: title attribute holds the product name
+      // Non-branded: fall back to the link's title attribute (product name only, no brand prefix)
       const titleMatch = detailsSeg.match(/title="([^"]+)"/);
-      name = titleMatch ? titleMatch[1].trim() : '';
+      name = titleMatch ? stripHtml(titleMatch[1]).trim() : '';
     }
     if (!name) continue;
 
-    // Now price — inside prices__price--sale, take the first product-content__price--inc GBP value
-    // Note: server HTML puts class="GBP" and closing > on separate lines, so \s* between them
-    const nowMatch = seg.match(/prices__price--sale[\s\S]+?product-content__price--inc[\s\S]+?class="GBP"\s*>\s*£([\d.]+)/);
+    // Now price — first product-content__price--inc GBP value in the prices block.
+    // Works for both sale items (prices__price--sale) and full-price items.
+    // Server HTML puts class="GBP" and its closing > on separate lines, hence \s* between them.
+    const priceBlockIdx = seg.indexOf('product__details__prices');
+    if (priceBlockIdx === -1) continue;
+    const priceBlock = seg.slice(priceBlockIdx, priceBlockIdx + 2000);
+    const nowMatch = priceBlock.match(/product-content__price--inc[\s\S]+?class="GBP"\s*>\s*£([\d.]+)/);
     if (!nowMatch) continue;
     const price = parseFloat(nowMatch[1]);
     if (isNaN(price)) continue;
 
-    // Was price — inside prices__was
-    const wasMatch = seg.match(/prices__was[\s\S]+?product-content__price--inc[\s\S]+?class="GBP"\s*>\s*£([\d.]+)/);
+    // Was price — only present when item is on sale (prices__was section)
+    const wasMatch = priceBlock.match(/prices__was[\s\S]+?product-content__price--inc[\s\S]+?class="GBP"\s*>\s*£([\d.]+)/);
     const wasPrice = wasMatch ? parseFloat(wasMatch[1]) : null;
 
     const hasDeal     = wasPrice != null && wasPrice > price + 0.005;
