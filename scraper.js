@@ -5,9 +5,13 @@ const path = require('path');
 const cron = require('node-cron');
 require('dotenv').config();
 
-// One-shot diagnostic mode: set TEST_BOOTS=1 in Bisect env, restart, read console, then remove it.
+// One-shot diagnostic mode: set TEST_BOOTS=1 or TEST_TOYTOWN=1 in Bisect env, restart, read console, then remove it.
 if (process.env.TEST_BOOTS === '1') {
   require('./scripts/test-boots.js');
+  return;
+}
+if (process.env.TEST_TOYTOWN === '1') {
+  require('./scripts/test-toytown.js');
   return;
 }
 
