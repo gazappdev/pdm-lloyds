@@ -470,15 +470,7 @@ async function scan() {
     totOos,
     coldStart,
     coldStartPreviewSent: coldStart ? COLD_START_PREVIEW_COUNT - coldStartBudget.remaining : 0,
-    categorySummary: [{
-      label:    'All Products',
-      new:      totNew,
-      drops:    totPriceDrops,
-      restocks: totRestocks,
-      pages:    totPages,
-      seen:     totSeen,
-      error:    totPages === 0 && !paginationComplete,
-    }],
+    categorySummary: [], // single category — totals shown in main stats, no breakdown needed
     totalCached,
     newCats:     [],
     missingCats: [],
