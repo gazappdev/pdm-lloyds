@@ -37,30 +37,50 @@ async function run() {
   console.log(`[test-toytown] CAPTCHA/bot challenge detected: ${hasCaptcha}`);
   console.log(`[test-toytown] Incapsula detected: ${hasIncapsula}`);
 
-  // Print first 3000 chars so we can see what was returned
-  console.log('\n[test-toytown] --- HTML HEAD (first 3000 chars) ---');
-  console.log(html.slice(0, 3000));
+  // Print first 1000 chars so we can see the page head
+  console.log('\n[test-toytown] --- HTML HEAD (first 1000 chars) ---');
+  console.log(html.slice(0, 1000));
 
-  // If products found, print first segment around one product div
-  if (productDivCount > 0) {
-    const idx = html.indexOf('parent_product_id_');
-    console.log('\n[test-toytown] --- FIRST PRODUCT SEGMENT (500 chars) ---');
-    console.log(html.slice(Math.max(0, idx - 50), idx + 500));
-  } else {
-    // Look for any <div class="product" pattern at all
-    const anyProduct = html.indexOf('class="product');
-    if (anyProduct !== -1) {
-      console.log('\n[test-toytown] --- NEAREST "product" class (500 chars) ---');
-      console.log(html.slice(anyProduct, anyProduct + 500));
+  // Dump the FULL first product segment so we can inspect every attribute/class name
+  const segments = html.split(/(?=<div class="product product--)/);
+  console.log(`\n[test-toytown] Split segments: ${segments.length} (first is preamble)`);
+
+  const firstProductSeg = segments.find(s => /parent_product_id_/.test(s));
+  if (firstProductSeg) {
+    console.log(`\n[test-toytown] --- FULL FIRST PRODUCT SEGMENT (${firstProductSeg.length} chars) ---`);
+    // Print in 2000-char chunks so nothing gets cut off
+    for (let i = 0; i < Math.min(firstProductSeg.length, 6000); i += 2000) {
+      console.log(firstProductSeg.slice(i, i + 2000));
+      console.log('--- (chunk boundary) ---');
     }
 
-    // Check if there's an AJAX/API endpoint hint in the HTML
-    const ajaxMatches = [...html.matchAll(/\/ajax\/[^\s"'<>]+/g)].map(m => m[0]).slice(0, 10);
-    console.log('\n[test-toytown] AJAX endpoint hints:', ajaxMatches);
+    // Now test each regex individually and report pass/fail
+    console.log('\n[test-toytown] --- REGEX TESTS ON FIRST PRODUCT SEGMENT ---');
 
-    // Check for JavaScript-rendered product loader hints
-    const jsLoaderHints = [...html.matchAll(/product[_-]?list|getProducts|loadProducts|categoryProducts/gi)].map(m => m[0]).slice(0, 5);
-    console.log('[test-toytown] JS product-loader hints:', jsLoaderHints);
+    const tests = [
+      ['product ID',      /parent_product_id_(\d+)/,                                                                      firstProductSeg],
+      ['product URL',     /href="(\/[^"]+\-p\d+)"/,                                                                       firstProductSeg],
+      ['thumb img src',   /src="(\/images\/[^"]+_thumb\.jpg)"/,                                                            firstProductSeg],
+      ['data-src thumb',  /data-src="(\/images\/[^"]+_thumb\.jpg)"/,                                                       firstProductSeg],
+      ['SKU ref',         /data-productreference="([^"]+)"/,                                                               firstProductSeg],
+      ['details title',   /product__details__title/,                                                                       firstProductSeg],
+      ['brand span',      /<span>\s*([\s\S]+?)\s*<\/span>/,          firstProductSeg.slice(firstProductSeg.indexOf('product__details__title') !== -1 ? firstProductSeg.indexOf('product__details__title') : 0, firstProductSeg.indexOf('product__details__title') + 700)],
+      ['price--sale cls', /prices__price--sale/,                                                                           firstProductSeg],
+      ['price--inc cls',  /product-content__price--inc/,                                                                   firstProductSeg],
+      ['GBP class dq',    /class="GBP">/,                                                                                  firstProductSeg],
+      ['GBP class sq',    /class='GBP'>/,                                                                                  firstProductSeg],
+      ['prices__was cls', /prices__was/,                                                                                   firstProductSeg],
+      ['now price full',  /prices__price--sale[\s\S]+?product-content__price--inc[\s\S]+?class="GBP">\s*£([\d.]+)/,       firstProductSeg],
+      ['was price full',  /prices__was[\s\S]+?product-content__price--inc[\s\S]+?class="GBP">\s*£([\d.]+)/,               firstProductSeg],
+    ];
+
+    for (const [label, re, target] of tests) {
+      const m = (target || '').match(re);
+      console.log(`  ${m ? '✅' : '❌'} ${label}: ${m ? JSON.stringify(m[1] || m[0]).slice(0, 80) : 'NO MATCH'}`);
+    }
+  } else {
+    console.log('[test-toytown] No product segment found after split — split regex may not match.');
+    console.log('First 200 chars of segment[1]:', segments[1] ? segments[1].slice(0, 200) : '(none)');
   }
 
   console.log('[test-toytown] Done.');
