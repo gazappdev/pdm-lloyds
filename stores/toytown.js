@@ -144,18 +144,18 @@ function parseSalePage(html) {
     const wasMatch = seg.match(/prices__was[\s\S]+?product-content__price--inc[\s\S]+?class="GBP"\s*>\s*£([\d.]+)/);
     const wasPrice = wasMatch ? parseFloat(wasMatch[1]) : null;
 
-    // Skip full-price items (shouldn't appear on /sale, but guard anyway)
-    if (wasPrice == null || wasPrice <= price + 0.005) continue;
-
-    const discountPct = Math.round((wasPrice - price) / wasPrice * 100);
+    const hasDeal     = wasPrice != null && wasPrice > price + 0.005;
+    const discountPct = hasDeal ? Math.round((wasPrice - price) / wasPrice * 100) : null;
 
     products.push({
-      id, name, brand, sku, price, wasPrice, discountPct,
+      id, name, brand, sku, price,
+      wasPrice:    hasDeal ? wasPrice    : null,
+      discountPct: hasDeal ? discountPct : null,
       imageUrl, productUrl,
       ean:    null,
-      inStock: true, // present on listing = assumed in stock
-      source: 'toytown-sale',
-      collection: 'Sale',
+      inStock: true,
+      source: 'toytown-all',
+      collection: 'All Products',
     });
   }
 
@@ -383,7 +383,7 @@ async function scan() {
   for (let pageNum = 1; ; pageNum++) {
     if (pageNum > 1) await sleep(PAGE_DELAY_MS + randInt(0, 400));
 
-    const url  = pageNum === 1 ? `${ORIGIN}/sale` : `${ORIGIN}/sale?page=${pageNum}`;
+    const url  = pageNum === 1 ? `${ORIGIN}/search/all-products` : `${ORIGIN}/search/all-products?page=${pageNum}`;
     const html = await fetchHtml(url);
 
     if (!html) {
@@ -428,7 +428,7 @@ async function scan() {
   if (totPages > 0 && paginationComplete) {
     for (const id of Object.keys(cache.items)) {
       const it = cache.items[id];
-      if (!it || it.source !== 'toytown-sale') continue;
+      if (!it || (it.source !== 'toytown-all' && it.source !== 'toytown-sale')) continue;
       if (seenThisRun.has(id)) continue;
       if (it.status === 'active') {
         cache.items[id].status = 'oos';
@@ -455,13 +455,13 @@ async function scan() {
     coldStart,
     coldStartPreviewSent: coldStart ? COLD_START_PREVIEW_COUNT - coldStartBudget.remaining : 0,
     categorySummary: [{
-      label:    'Sale',
+      label:    'All Products',
       new:      totNew,
       drops:    totPriceDrops,
       restocks: totRestocks,
       pages:    totPages,
       seen:     totSeen,
-      error:    totPages === 0,
+      error:    totPages === 0 && !paginationComplete,
     }],
     totalCached,
     newCats:     [],
@@ -499,7 +499,7 @@ async function exportCSV(scrapesheetWebhook, scrapesheetWebhook2) {
   ];
   const rows = [headers.map(csvEscape).join(',')];
 
-  for (const item of Object.values(cache.items).filter(it => it.source === 'toytown-sale')) {
+  for (const item of Object.values(cache.items).filter(it => it.source === 'toytown-all' || it.source === 'toytown-sale')) {
     const enc = encodeURIComponent(item.ean || item.name || '');
     rows.push([
       item.imageUrl   ? `=IMAGE("${item.imageUrl}")` : '',
