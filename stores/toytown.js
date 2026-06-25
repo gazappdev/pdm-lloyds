@@ -378,28 +378,43 @@ async function scan() {
   let paginationComplete   = false;
 
   if (coldStart) console.log(`[${STORE_NAME}] Cold start — posting first ${COLD_START_PREVIEW_COUNT} deals for verification, caching rest silently.`);
-  console.log(`\n[${STORE_NAME}] Starting sale scan...`);
+  console.log(`\n[${STORE_NAME}] Starting all-products scan...`);
 
-  for (let pageNum = 1; ; pageNum++) {
+  // Fetch page 1 first to discover total page count from pagination ("Page 1 Of N")
+  const page1Html = await fetchHtml(`${ORIGIN}/search/all-products`);
+  if (!page1Html) {
+    console.error(`[${STORE_NAME}] Failed to fetch page 1 — aborting scan.`);
+    return {
+      storeName: STORE_NAME, color: EMBED_COLOR, logoFile: LOGO_FILE,
+      uniqueSeen: 0, pagesScraped: 0, totNew: 0, totPriceDrops: 0,
+      totRestocks: 0, totOos: 0, coldStart, coldStartPreviewSent: 0,
+      categorySummary: [{ label: 'All Products', new: 0, drops: 0, restocks: 0, pages: 0, seen: 0, error: true }],
+      totalCached: Object.keys(cache.items).length, newCats: [], missingCats: [],
+    };
+  }
+
+  const pageCountMatch = page1Html.match(/Page\s+\d+\s+Of\s+(\d+)/i);
+  const maxPages = pageCountMatch ? parseInt(pageCountMatch[1]) : 999;
+  console.log(`[${STORE_NAME}] Total pages: ${maxPages}`);
+
+  for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
     if (pageNum > 1) await sleep(PAGE_DELAY_MS + randInt(0, 400));
 
-    const url  = pageNum === 1 ? `${ORIGIN}/search/all-products` : `${ORIGIN}/search/all-products?page=${pageNum}`;
-    const html = await fetchHtml(url);
+    const html = pageNum === 1 ? page1Html : await fetchHtml(`${ORIGIN}/search/all-products?page=${pageNum}`);
 
     if (!html) {
-      if (pageNum === 1) console.error(`[${STORE_NAME}] Failed to fetch sale page 1 — aborting scan.`);
-      else                console.warn(`[${STORE_NAME}] Page ${pageNum} fetch failed — stopping pagination early.`);
+      console.warn(`[${STORE_NAME}] Page ${pageNum} fetch failed — stopping pagination early.`);
       break;
     }
 
     const products = parseSalePage(html);
     if (products.length === 0) {
       paginationComplete = true;
-      console.log(`[${STORE_NAME}] Page ${pageNum}: no products — pagination complete.`);
+      console.log(`[${STORE_NAME}] Page ${pageNum}: no products — stopping early.`);
       break;
     }
 
-    console.log(`[${STORE_NAME}] Page ${pageNum}: ${products.length} products`);
+    console.log(`[${STORE_NAME}] Page ${pageNum}/${maxPages}: ${products.length} products`);
     totPages++;
     totSeen += products.length;
 
@@ -421,6 +436,7 @@ async function scan() {
     }
 
     saveCache(cache);
+    if (pageNum === maxPages) paginationComplete = true;
   }
 
   // Mark OOS only when we successfully scraped all pages (avoid false OOS on partial runs)
