@@ -25,6 +25,7 @@ const STORES = [toytown, lloyds, boots, entertainer];
 const MONITOR_WEBHOOK_URL   = process.env.MONITOR_WEBHOOK_URL       || '';
 const SCRAPESHEET_WEBHOOK   = process.env.SCRAPESHEET_WEBHOOK_URL   || '';
 const SCRAPESHEET_WEBHOOK_2 = process.env.SCRAPESHEET_WEBHOOK_URL_2 || '';
+const ALERT_USER_ID         = process.env.DISCORD_ALERT_USER_ID     || '1064266465647276045';
 
 const sleep   = ms => new Promise(r => setTimeout(r, ms));
 const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
@@ -163,6 +164,11 @@ async function runLoop() {
       const storeSecs = Math.round((Date.now() - storeStart) / 1000);
       const durStr    = `${Math.floor(storeSecs / 60)}m ${storeSecs % 60}s`;
       await postStoreSummary(stats, durStr, delayMins, nextTimeFull);
+
+      if (stats.uniqueSeen === 0 || stats.pagesScraped === 0) {
+        const reason = stats.pagesScraped === 0 ? 'could not reach the site (0 pages scraped)' : 'scraped pages but found 0 products (parser may be broken)';
+        await sendMonitor(`⚠️ <@${ALERT_USER_ID}> **${stats.storeName}** scan alert — ${reason}.`);
+      }
     }
 
     const totalSecs = Math.round((Date.now() - cycleStart) / 1000);
