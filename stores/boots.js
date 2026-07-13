@@ -180,13 +180,6 @@ function processProduct(p, cache, seenThisRun) {
   cache.items[p.id].brand   = p.brand;
   cache.items[p.id].inStock = p.inStock;
 
-  if (p.wasPrice == null) {
-    cache.items[p.id].price       = p.price;
-    cache.items[p.id].wasPrice    = null;
-    cache.items[p.id].discountPct = null;
-    return { type: null };
-  }
-
   const prevPrice = prev.price;
   if (prevPrice != null && p.price < prevPrice - 0.005) {
     const newPct = Math.round((1 - p.price / prevPrice) * 100);
