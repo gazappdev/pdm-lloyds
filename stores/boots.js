@@ -17,6 +17,11 @@ const CATEGORIES = [
   { id: '1595046', label: 'Fragrance Offers' },
   { id: '1595111', label: 'Electrical Offers' },
   { id: '1595040', label: 'Hair' },
+  { id: '1595033', label: 'Health Offers' },
+  { id: '1595042', label: 'Skincare Offers' },
+  { id: '1595072', label: 'Opticians Offers' },
+  { id: '2921187', label: 'Makeup Offers' },
+  { id: '1595110', label: 'Baby & Child Offers' },
 ];
 
 const EMBED_COLOR = 0x003DA5; // Boots blue (Pantone 286C)
