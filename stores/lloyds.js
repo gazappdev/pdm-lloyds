@@ -30,6 +30,10 @@ const FETCH_HEADERS = {
   'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 };
 
+// Shopify Storefront API — public token embedded in page JS; replaces /products.json (blocked by Lloyds).
+const STOREFRONT_TOKEN = 'd77ca0518de5253b825c7c9f57a020c6';
+const GQL_URL          = `${ORIGIN}/api/2024-01/graphql.json`;
+
 // ===== CATEGORY PERSISTENCE =====
 function loadKnownCategories() {
   try {
@@ -151,25 +155,60 @@ async function checkCategories() {
   return { discoveredHandles, newCats, missingCats };
 }
 
-// ===== SHOPIFY PRODUCT FETCHER =====
-async function fetchCollectionPage(handle, pageNum) {
-  const url = `${ORIGIN}/collections/${handle}/products.json?limit=250&page=${pageNum}`;
+// ===== SHOPIFY STOREFRONT GRAPHQL FETCHER =====
+async function fetchCollectionProducts(handle, cursor = null) {
+  const after = cursor ? `, after: "${cursor}"` : '';
+  const query = `{
+    collection(handle: "${handle}") {
+      products(first: 250${after}) {
+        pageInfo { hasNextPage endCursor }
+        edges {
+          node {
+            id title vendor handle
+            images(first: 1) { edges { node { url } } }
+            variants(first: 1) {
+              edges {
+                node {
+                  price { amount }
+                  compareAtPrice { amount }
+                  barcode sku availableForSale
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }`;
   try {
-    const res = await fetch(url, {
+    const res = await fetch(GQL_URL, {
+      method:  'POST',
       headers: {
-        'Accept':          'application/json',
+        'Content-Type': 'application/json',
+        'X-Shopify-Storefront-Access-Token': STOREFRONT_TOKEN,
         'Accept-Language': 'en-GB,en;q=0.9',
-        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       },
+      body: JSON.stringify({ query }),
     });
     if (!res.ok) {
-      console.warn(`  [${STORE_NAME}] Collection fetch ${res.status} for ${handle} page ${pageNum}`);
+      console.warn(`  [${STORE_NAME}] GraphQL ${res.status} for ${handle}`);
       return null;
     }
     const data = await res.json();
-    return data.products || [];
+    if (data.errors) {
+      console.warn(`  [${STORE_NAME}] GraphQL errors for ${handle}:`, JSON.stringify(data.errors).slice(0, 200));
+      return null;
+    }
+    const col = data.data?.collection;
+    if (!col) return { products: [], hasNextPage: false, endCursor: null };
+    return {
+      products:    col.products.edges.map(e => e.node),
+      hasNextPage: col.products.pageInfo.hasNextPage,
+      endCursor:   col.products.pageInfo.endCursor,
+    };
   } catch (e) {
-    console.warn(`  [${STORE_NAME}] Fetch error ${handle} p${pageNum}: ${e.message}`);
+    console.warn(`  [${STORE_NAME}] GraphQL fetch error ${handle}: ${e.message}`);
     return null;
   }
 }
@@ -177,16 +216,17 @@ async function fetchCollectionPage(handle, pageNum) {
 // ===== PRODUCT PARSER =====
 function parseProduct(raw, collectionHandle) {
   if (!raw || !raw.id) return null;
-  const variant = (raw.variants || [])[0];
+  const variant = raw.variants?.edges?.[0]?.node;
   if (!variant) return null;
 
-  const id   = String(raw.id);
+  // GraphQL returns gid://shopify/Product/12345 — extract numeric part for cache compatibility
+  const id   = String(raw.id).split('/').pop();
   const name = (raw.title || '').trim();
   if (!name) return null;
 
-  const price    = variant.price != null ? Number(variant.price) : null;
-  const wasPrice = variant.compare_at_price && Number(variant.compare_at_price) > 0
-    ? Number(variant.compare_at_price) : null;
+  const price      = variant.price?.amount != null ? Number(variant.price.amount) : null;
+  const compareAt  = variant.compareAtPrice?.amount != null ? Number(variant.compareAtPrice.amount) : null;
+  const wasPrice   = compareAt && compareAt > 0 ? compareAt : null;
   if (price == null) return null;
 
   const hasDeal     = wasPrice != null && wasPrice > price + 0.005;
@@ -201,9 +241,9 @@ function parseProduct(raw, collectionHandle) {
     discountPct: hasDeal ? discountPct : null,
     ean:         (variant.barcode || '').trim() || null,
     sku:         (variant.sku     || '').trim() || null,
-    imageUrl:    raw.images && raw.images[0] ? raw.images[0].src : '',
+    imageUrl:    raw.images?.edges?.[0]?.node?.url || '',
     productUrl:  `${ORIGIN}/products/${raw.handle}`,
-    inStock:     variant.available !== false,
+    inStock:     variant.availableForSale !== false,
     source:      'lloyds-collection',
     collection:  collectionHandle,
   };
@@ -416,48 +456,52 @@ async function postToDiscord(p, type) {
 // ===== CATEGORY SCRAPER =====
 async function scrapeCategory(handle, cache, seenThisRun, coldStart, coldStartBudget) {
   let totNew = 0, totPriceDrops = 0, totRestocks = 0, pagesScraped = 0, totSeen = 0;
+  let cursor = null, pageNum = 0;
 
   console.log(`\n[${STORE_NAME}] Scanning: ${handle}${coldStart ? ` (cold start — ${coldStartBudget.remaining} preview posts remaining)` : ''}`);
 
-  for (let pageNum = 1; ; pageNum++) {
-    if (pageNum > 1) await sleep(500 + randInt(0, 500));
+  while (true) {
+    if (pageNum > 0) await sleep(500 + randInt(0, 500));
 
-    const products = await fetchCollectionPage(handle, pageNum);
-    if (!products || products.length === 0) {
-      if (pageNum === 1) console.warn(`  [${STORE_NAME}] No products for ${handle}`);
+    const result = await fetchCollectionProducts(handle, cursor);
+    if (!result || result.products.length === 0) {
+      if (pageNum === 0) console.warn(`  [${STORE_NAME}] No products for ${handle}`);
       break;
     }
 
+    pageNum++;
     pagesScraped++;
-    const items = products.map(r => parseProduct(r, handle)).filter(Boolean);
+    const items = result.products.map(r => parseProduct(r, handle)).filter(Boolean);
     totSeen += items.length;
     console.log(`  [${STORE_NAME}] Page ${pageNum}: ${items.length} products`);
 
     for (const p of items) {
-      const result = processProduct(p, cache, seenThisRun);
-      if (result.type === 'new')       totNew++;
-      if (result.type === 'priceDrop') totPriceDrops++;
-      if (result.type === 'restock')   totRestocks++;
+      const detection = processProduct(p, cache, seenThisRun);
+      if (detection.type === 'new')       totNew++;
+      if (detection.type === 'priceDrop') totPriceDrops++;
+      if (detection.type === 'restock')   totRestocks++;
+
       const shouldPost = !coldStart
-        ? (result.type === 'new' || result.type === 'priceDrop')
-        : (result.type === 'new' && coldStartBudget.remaining > 0);
+        ? (detection.type === 'new' || detection.type === 'priceDrop')
+        : (detection.type === 'new' && coldStartBudget.remaining > 0);
 
       if (shouldPost) {
-        if (!result.product.ean) {
+        if (!detection.product.ean) {
           await sleep(300 + randInt(0, 200));
-          const gtin = await fetchProductGtin(result.product.productUrl);
+          const gtin = await fetchProductGtin(detection.product.productUrl);
           if (gtin) {
-            result.product.ean = gtin;
-            if (cache.items[result.product.id]) cache.items[result.product.id].ean = gtin;
+            detection.product.ean = gtin;
+            if (cache.items[detection.product.id]) cache.items[detection.product.id].ean = gtin;
           }
         }
-        await postToDiscord(result.product, result.type);
+        await postToDiscord(detection.product, detection.type);
         if (coldStart) coldStartBudget.remaining--;
       }
     }
 
     saveCache(cache);
-    if (products.length < 250) break;
+    if (!result.hasNextPage) break;
+    cursor = result.endCursor;
   }
 
   return { totNew, totPriceDrops, totRestocks, pagesScraped, seen: totSeen };
