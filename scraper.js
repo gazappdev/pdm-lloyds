@@ -15,12 +15,13 @@ if (process.env.TEST_TOYTOWN === '1') {
   return;
 }
 
-const toytown     = require('./stores/toytown');
-const lloyds      = require('./stores/lloyds');
-const boots       = require('./stores/boots');
-const entertainer = require('./stores/entertainer');
+const toytown      = require('./stores/toytown');
+const lloyds       = require('./stores/lloyds');
+const boots        = require('./stores/boots');
+const entertainer  = require('./stores/entertainer');
+const homebargains = require('./stores/homebargains');
 
-const STORES = [toytown, lloyds, boots, entertainer];
+const STORES = [toytown, lloyds, boots, entertainer, homebargains];
 
 const MONITOR_WEBHOOK_URL   = process.env.MONITOR_WEBHOOK_URL       || '';
 const SCRAPESHEET_WEBHOOK   = process.env.SCRAPESHEET_WEBHOOK_URL   || '';
@@ -56,7 +57,7 @@ async function sendMonitor(content) {
 async function sendStartStop(status) {
   const symbol = status === 'start' ? '🟢' : '🛑';
   const text   = status === 'start' ? 'Bot started' : 'Bot stopping';
-  await sendMonitor(`**Toytown, Lloyds, Boots & Entertainer PDM** — ${symbol} ${text} ${formatUK()}`);
+  await sendMonitor(`**Toytown, Lloyds, Boots, Entertainer & Home Bargains PDM** — ${symbol} ${text} ${formatUK()}`);
 }
 
 // ===== SCAN SUMMARY =====
@@ -189,7 +190,7 @@ runLoop().catch(err => {
 // Hourly heartbeat
 cron.schedule('0 * * * *', async () => {
   await sendMonitor(
-    `**Toytown, Lloyds, Boots & Entertainer PDM** — Online ${new Date().toLocaleTimeString('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit' })}`
+    `**Toytown, Lloyds, Boots, Entertainer & Home Bargains PDM** — Online ${new Date().toLocaleTimeString('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit' })}`
   ).catch(() => {});
 }, { timezone: 'Europe/London' });
 
