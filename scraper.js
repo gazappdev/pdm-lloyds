@@ -21,7 +21,7 @@ const boots        = require('./stores/boots');
 const entertainer  = require('./stores/entertainer');
 const homebargains = require('./stores/homebargains');
 
-const STORES = [toytown, lloyds, boots, entertainer, homebargains];
+const STORES = [homebargains, toytown, lloyds, boots, entertainer];
 
 const MONITOR_WEBHOOK_URL   = process.env.MONITOR_WEBHOOK_URL       || '';
 const SCRAPESHEET_WEBHOOK   = process.env.SCRAPESHEET_WEBHOOK_URL   || '';
