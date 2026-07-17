@@ -433,8 +433,8 @@ async function exportCSV(scrapesheetWebhook, scrapesheetWebhook2) {
   fs.writeFileSync(filepath, '﻿' + rows.join('\r\n'), 'utf8');
   console.log(`[${STORE_NAME}] CSV exported: ${filename} (${rows.length - 1} products)`);
 
-  const webhook = process.env.HB_SCRAPESHEET_WEBHOOK_URL || scrapesheetWebhook || '';
-  if (!webhook) { console.warn(`[${STORE_NAME}] No HB_SCRAPESHEET_WEBHOOK_URL — skipping.`); return; }
+  const webhook = scrapesheetWebhook || '';
+  if (!webhook) { console.warn(`[${STORE_NAME}] No scrapesheet webhook — skipping.`); return; }
 
   for (const wh of [webhook, scrapesheetWebhook2].filter(Boolean)) {
     try {
