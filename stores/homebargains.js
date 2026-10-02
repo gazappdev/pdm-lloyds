@@ -195,7 +195,7 @@ function buildEmbed(p, type) {
   const detailLines = [`Product ID: \`${p.productCode || 'N/A'}\``];
   if (p.maxQty) detailLines.push(`Order Limit / Total Stock: ${p.maxQty}`);
 
-  const enc = encodeURIComponent(p.name || '');
+  const enc = encodeURIComponent(capSearchQuery(p.name || ''));
   const searchLinks = [
     `[SAS](https://sas.selleramp.com/sas/lookup?sasLookup&search_term=${enc})`,
     `[Amazon](https://www.amazon.co.uk/s?k=${enc})`,
@@ -413,7 +413,7 @@ async function exportCSV(scrapesheetWebhook, scrapesheetWebhook2) {
   const rows = [headers.map(csvEscape).join(',')];
 
   for (const item of Object.values(cache.items).filter(it => it.status === 'active')) {
-    const enc = encodeURIComponent(item.name || '');
+    const enc = encodeURIComponent(capSearchQuery(item.name || ''));
     rows.push([
       item.thumb       ? `=IMAGE("${item.thumb}")` : '',
       item.productCode || 'N/A',
@@ -452,3 +452,24 @@ module.exports = {
   scan,
   exportCSV,
 };
+
+// --- Discord field-limit guard (added 2026-10-02) ---------------------------
+// Discord allows 1024 characters per embed field. The search-links field
+// encodes the product name into four separate links, so a long name is
+// multiplied roughly fourfold and blows that limit. Discord then rejects the
+// whole embed with a 400 and the lead is silently lost - iHerb was dropping 59
+// products this way and the Asda/Game/Studio group nearly 200. Cap the search
+// term: 120 characters is far more than any search engine makes use of, and an
+// EAN or product id is far shorter than the cap so it passes through untouched.
+function capSearchQuery(value, maxRaw = 120, maxEncoded = 180) {
+  let s = String(value == null ? '' : value).trim();
+  if (s.length > maxRaw) {
+    s = s.slice(0, maxRaw);
+    const cut = s.lastIndexOf(' ');
+    if (cut > 40) s = s.slice(0, cut);
+  }
+  // Encoding can treble the length (a space becomes %20), so a raw cap alone
+  // does not bound the field. Trim until the encoded form fits as well.
+  while (s.length && encodeURIComponent(s).length > maxEncoded) s = s.slice(0, -8);
+  return s.trim();
+}
