@@ -52,6 +52,19 @@ const LEGACY_SEEDED = ['2608697', '1595059', '1595046', '1595111', '1595040', '1
 // offer category at once; anything over the cap is cached silently and logged.
 const MAX_NEW_POSTS_PER_SCAN = parseInt(process.env.BOOTS_MAX_NEW_POSTS || '40', 10);
 
+// Promotions. The category feed carries only the shelf price; the offer a shopper actually
+// gets ("Save 1/3", "Only £2", "3 for 2") lives in sKUs[].promotion_name on the product-detail
+// feed, and the shelf price does NOT move when one starts (verified 2026-10-07). Each scan
+// asks byIds for PROMO_BATCHES x PROMO_BATCH_SIZE products, least-recently-checked first,
+// so the core range is covered every ~3 scans. BOOTS_PROMOS=0 switches the whole pass off.
+const PROMOS_ENABLED       = process.env.BOOTS_PROMOS !== '0';
+const PROMO_BATCH_SIZE     = 50;
+const PROMO_BATCHES        = parseInt(process.env.BOOTS_PROMO_BATCHES || '40', 10);
+const MAX_PROMO_POSTS      = parseInt(process.env.BOOTS_MAX_PROMO_POSTS || '25', 10);
+const PROMO_MIN_PCT        = parseInt(process.env.BOOTS_PROMO_MIN_PCT || '20', 10);
+const PROMO_REPOST_DAYS    = 7;
+const PROMO_MAX_FAILURES   = 2;
+
 const EMBED_COLOR = 0x003DA5; // Boots blue (Pantone 286C)
 const CACHE_FILE  = path.resolve(__dirname, '..', 'last_seen_boots.json');
 const LOGO_FILE   = path.resolve(__dirname, '..', 'boots.png');
@@ -125,6 +138,26 @@ async function fetchProductDetail(uniqueID) {
   } catch { return null; }
 }
 
+// One request for up to PROMO_BATCH_SIZE products, each with its sKUs (promotions, SEO token).
+// Returns a Map of uniqueID -> entry, or null when the request failed.
+async function fetchProductsByIds(ids) {
+  const url = `${ORIGIN}/search/resources/store/${STORE_ID}/productview/byIds?${ids.map(i => `id=${i}`).join('&')}&lang=-1`;
+  try {
+    const res = await fetch(url, { headers: API_HEADERS, signal: AbortSignal.timeout(45000) });
+    if (!res.ok) {
+      console.warn(`[${STORE_NAME}] Promo batch: HTTP ${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    const map  = new Map();
+    for (const e of data.catalogEntryView || []) if (e && e.uniqueID) map.set(String(e.uniqueID), e);
+    return map;
+  } catch (e) {
+    console.warn(`[${STORE_NAME}] Promo batch fetch error: ${e.message}`);
+    return null;
+  }
+}
+
 // ===== PRODUCT PARSER =====
 function parseProduct(raw, categoryLabel, source) {
   if (!raw || !raw.uniqueID) return null;
@@ -159,6 +192,7 @@ function parseProduct(raw, categoryLabel, source) {
     price,
     wasPrice:    hasDeal ? wasPrice    : null,
     discountPct: hasDeal ? discountPct : null,
+    offerPrice:  !isNaN(offerNum) ? offerNum : price,   // shelf price promotions apply to
     ean,
     sku:         raw.partNumber || null,
     partNum,
@@ -171,25 +205,153 @@ function parseProduct(raw, categoryLabel, source) {
   };
 }
 
-// Fetch SEO URL and image for a product about to be posted to Discord.
-// Mirrors the GTIN-fetch pattern in lloyds.js — only runs for products being posted.
-async function enrichProduct(product) {
-  await sleep(300 + randInt(0, 200));
-  const detail = await fetchProductDetail(product.uniqueID);
-
-  if (detail) {
-    // SEO URL: first token from seo_token_ntk (semicolon-separated variants)
-    const seoToken = detail.sKUs?.[0]?.seo_token_ntk?.split(';')[0];
-    product.productUrl = seoToken
-      ? `${ORIGIN}/${seoToken}`
-      : `${ORIGIN}/search?q=${encodeURIComponent(product.partNum)}`;
-
-  } else {
-    product.productUrl = `${ORIGIN}/search?q=${encodeURIComponent(product.partNum)}`;
-  }
+// Sets the SEO URL and image from a product-detail entry (byId or byIds).
+function applyDetailLinks(product, detail) {
+  // SEO URL: first token from seo_token_ntk (semicolon-separated variants)
+  const seoToken = detail?.sKUs?.[0]?.seo_token_ntk?.split(';')[0];
+  product.productUrl = seoToken
+    ? `${ORIGIN}/${seoToken}`
+    : `${ORIGIN}/search?q=${encodeURIComponent(product.partNum)}`;
 
   // Scene7 CDN — confirmed in probe run 7; constructed from partNum, no API call needed.
   product.imageUrl = `https://boots.scene7.com/is/image/Boots/${product.partNum}`;
+}
+
+// Fetch SEO URL and image for a product about to be posted to Discord.
+// Mirrors the GTIN-fetch pattern in lloyds.js — only runs for products being posted.
+// The same response carries the product's promotions, so the card shows them for free.
+async function enrichProduct(product) {
+  await sleep(300 + randInt(0, 200));
+  const detail = await fetchProductDetail(product.uniqueID);
+  applyDetailLinks(product, detail);
+
+  if (PROMOS_ENABLED) {
+    try {
+      const texts = extractPromoTexts(detail);
+      if (texts) setPromoState(product, evaluatePromos(product, texts));
+    } catch (e) {
+      console.warn(`[${STORE_NAME}] Promo parse error for ${product.name}: ${e.message}`);
+    }
+  }
+}
+
+// ===== PROMOTIONS =====
+const money = n => Math.round(n * 100) / 100;
+
+// UK promotion texts for a detail entry. null = no sKU data, so nothing can be said either way.
+// Entries look like "11352:Save 1/3 on selected Lynx"; 11353 is the Irish (euro) store.
+function extractPromoTexts(entry) {
+  if (!entry || !Array.isArray(entry.sKUs) || !entry.sKUs.length) return null;
+  const out = new Set();
+  for (const sku of entry.sKUs) {
+    for (const raw of [].concat(sku.promotion_name || [])) {
+      const str = String(raw);
+      if (!str.startsWith(`${STORE_ID}:`)) continue;
+      const text = str.slice(STORE_ID.length + 1).replace(/\s+/g, ' ').trim();
+      if (text) out.add(text);
+    }
+  }
+  return [...out];
+}
+
+// Advantage Card points, app-only "My Offers", delivery codes and free gifts change nothing
+// about what the product costs, so they are dropped before anything is compared.
+const PROMO_NOISE = /my offers|digital_offer|advantage card|delivery|free gift|^free |receive a free|\bgift,? when/i;
+
+// Turns one promotion text into what it does to the unit price.
+//   kind 'price' — unit price known (qty > 1 = only when buying that many; code = needs a code)
+//   kind 'spend' — "Save £X when you spend £Y": real, but depends on the basket
+//   kind 'vague' — "Save up to...", "Great savings...": shown on cards, never triggers a post
+function parsePromo(text, base) {
+  if (!text || PROMO_NOISE.test(text)) return null;
+  const t = text.replace(/^star gift\s*-\s*/i, '');
+  const vague = { kind: 'vague', text };
+  if (/up to|better th[ae]n|great savings|from only|from £/i.test(t)) return vague;
+
+  let m;
+  if ((m = t.match(/save £([\d.]+) when you spend £([\d.]+)/i))) {
+    const pct = Math.round(parseFloat(m[1]) / parseFloat(m[2]) * 100);
+    return { kind: 'spend', text, pct };
+  }
+  if (/when you spend/i.test(t)) return vague;
+
+  let price = null, qty = 1, code = null;
+  const fraction = () => {
+    let f;
+    if ((f = t.match(/(\d+) percent/i)))    return 1 - parseInt(f[1], 10) / 100;
+    if ((f = t.match(/(\d)\/(\d) price/i))) return parseInt(f[1], 10) / parseInt(f[2], 10);
+    if ((f = t.match(/(\d)\/(\d)/)))        return 1 - parseInt(f[1], 10) / parseInt(f[2], 10);
+    return null;
+  };
+
+  if ((m = t.match(/^only £([\d.]+)/i))) {
+    price = parseFloat(m[1]);
+  } else if ((m = t.match(/^(\d+) for £([\d.]+)/i))) {
+    qty = parseInt(m[1], 10); price = parseFloat(m[2]) / qty;
+  } else if ((m = t.match(/^(\d+) for (\d+)\b/i))) {
+    qty = parseInt(m[1], 10); price = base * parseInt(m[2], 10) / qty;
+  } else if ((m = t.match(/^buy (\d+) get (\d+) free/i))) {
+    const pay = parseInt(m[1], 10); qty = pay + parseInt(m[2], 10); price = base * pay / qty;
+  } else if (/^buy 1 get 2nd 1\/2 price/i.test(t)) {
+    qty = 2; price = base * 0.75;
+  } else if ((m = t.match(/save £([\d.]+) when you buy (\d+)/i))) {
+    qty = parseInt(m[2], 10); price = base - parseFloat(m[1]) / qty;
+  } else if ((m = t.match(/^save £([\d.]+) on/i))) {
+    price = base - parseFloat(m[1]);
+  } else {
+    const f = fraction();
+    if (f == null) return vague;
+    price = base * f;
+    if ((m = t.match(/when you buy (\d+)/i))) qty = parseInt(m[1], 10);
+    if ((m = t.match(/use code (\w+)/i)))     code = m[1];
+  }
+
+  if (!isFinite(price) || !isFinite(qty) || qty < 1) return vague;
+  price = money(price);
+  if (price <= 0 || price > base - 0.005) return vague;   // must be a real saving
+  return { kind: 'price', text, price, qty, code, pct: Math.round((1 - price / base) * 100) };
+}
+
+// Works out a product's promotion state from its texts: the best (cheapest) priced offer
+// leads, a spend-threshold offer is the fallback, and `texts` is everything worth showing.
+function evaluatePromos(item, texts) {
+  const base   = item.offerPrice != null ? item.offerPrice : item.price;
+  const parsed = texts.map(t => parsePromo(t, base)).filter(Boolean);
+  const priced = parsed.filter(p => p.kind === 'price').sort((a, b) => a.price - b.price)[0];
+  const spend  = parsed.filter(p => p.kind === 'spend').sort((a, b) => b.pct - a.pct)[0];
+  const lead   = priced || spend || null;
+  return {
+    texts: [...(lead ? [lead.text] : []), ...parsed.map(p => p.text).filter(t => !lead || t !== lead.text)].slice(0, 4),
+    text:  lead ? lead.text : null,
+    price: priced ? priced.price : null,
+    qty:   priced ? priced.qty   : null,
+    code:  priced ? priced.code  : null,
+    pct:   lead ? lead.pct : null,
+  };
+}
+
+function setPromoState(item, st) {
+  item.promos       = st.texts;
+  item.promoText    = st.text;
+  item.promoPrice   = st.price;
+  item.promoQty     = st.qty;
+  item.promoCode    = st.code;
+  item.promoChecked = Date.now();
+}
+
+// True when `st` is an offer the previous state did not already give at this price or better.
+function isNewPromo(prev, st) {
+  if (st.pct == null || st.pct < PROMO_MIN_PCT) return false;
+  if (st.price != null) return prev.promoPrice == null || st.price < prev.promoPrice - 0.005;
+  return st.text !== prev.promoText;
+}
+
+// Copy of a product priced as the shopper pays it: when a promotion gives a known unit
+// price, that is "Now" and the shelf price is "Was". The cached item itself is untouched.
+function withPromoPricing(p) {
+  const base = p.offerPrice != null ? p.offerPrice : p.price;
+  if (p.promoPrice == null || !(p.promoPrice < base - 0.005)) return p;
+  return { ...p, price: p.promoPrice, wasPrice: base, discountPct: Math.round((1 - p.promoPrice / base) * 100) };
 }
 
 // ===== CHANGE DETECTION =====
@@ -223,6 +385,7 @@ function processProduct(p, cache, seenThisRun, postNew) {
       price:       p.price,
       wasPrice:    prevPrice,
       discountPct: newPct,
+      offerPrice:  p.offerPrice,
       name:        p.name,
       brand:       p.brand,
       inStock:     p.inStock,
@@ -240,6 +403,7 @@ function processProduct(p, cache, seenThisRun, postNew) {
   cache.items[p.id].price       = p.price;
   cache.items[p.id].wasPrice    = p.wasPrice;
   cache.items[p.id].discountPct = p.discountPct;
+  cache.items[p.id].offerPrice  = p.offerPrice;
   return { type: null };
 }
 
@@ -284,7 +448,7 @@ function quoteLines(lines) {
 }
 
 function makeEmbed(p, type) {
-  const prefix = type === 'new' ? '🆕 ' : '📉 ';
+  const prefix = type === 'new' ? '🆕 ' : type === 'promo' ? '🏷️ ' : '📉 ';
 
   const detailLines = [
     p.brand ? `Brand: ${p.brand}`        : null,
@@ -295,6 +459,10 @@ function makeEmbed(p, type) {
   const pricingLines = [`Now: £${p.price.toFixed(2)}`];
   if (p.wasPrice)    pricingLines.push(`Was: £${p.wasPrice.toFixed(2)}`);
   if (p.discountPct) pricingLines.push(`Save: ${p.discountPct}%`);
+  if (p.promoPrice != null && p.promoPrice === p.price) {
+    if (p.promoQty > 1) pricingLines.push(`Each, when you buy ${p.promoQty}`);
+    if (p.promoCode)    pricingLines.push(`With code: \`${p.promoCode}\``);
+  }
 
   const eanQ   = p.ean ? encodeURIComponent(p.ean) : null;
   const titleQ = encodeURIComponent(capSearchQuery(p.name || ''));
@@ -322,12 +490,18 @@ function makeEmbed(p, type) {
     timestamp: new Date().toISOString(),
   };
 
+  if (Array.isArray(p.promos) && p.promos.length) {
+    const offerLines = p.promos.slice(0, 3).map(t => t.length > 200 ? t.slice(0, 197) + '...' : t);
+    embed.fields.splice(2, 0, { name: '🏷️ Offer', value: quoteLines(offerLines), inline: false });
+  }
+
   if (p.imageUrl) embed.thumbnail = { url: p.imageUrl };
 
   return embed;
 }
 
-async function postToDiscord(p, type) {
+async function postToDiscord(product, type) {
+  const p = withPromoPricing(product);
   const webhookUrl  = process.env.BOOTS_WEBHOOK_URL   || '';
   const webhookUrl2 = process.env.BOOTS_WEBHOOK_URL_2 || '';
   if (!webhookUrl) { console.warn(`[${STORE_NAME}] No BOOTS_WEBHOOK_URL — skipping.`); return; }
@@ -496,6 +670,79 @@ async function scrapeRotating(run) {
   return [...summary.values()];
 }
 
+// ===== PROMOTION PASS =====
+// Checks a slice of this scan's core products for promotions and posts the ones that have
+// newly started. A product's first check only records what it has (no post), so switching
+// this on does not flood the channel. Anything over the per-scan cap keeps its old state
+// and is looked at again when its turn comes round.
+async function scanPromotions(run) {
+  const { cache, seenThisRun } = run;
+  const stats = { batches: 0, checked: 0, seeded: 0, posted: 0, capped: 0, failed: 0, postedBy: {} };
+
+  const pool = [...seenThisRun]
+    .map(id => cache.items[id])
+    .filter(it => it && it.source === 'boots-category' && it.status === 'active')
+    .sort((a, b) => (a.promoChecked || 0) - (b.promoChecked || 0))
+    .slice(0, PROMO_BATCHES * PROMO_BATCH_SIZE);
+
+  const candidates = [];
+  let consecutiveFails = 0;
+
+  for (let i = 0; i < pool.length; i += PROMO_BATCH_SIZE) {
+    const batch = pool.slice(i, i + PROMO_BATCH_SIZE);
+    if (i > 0) await sleep(1000 + randInt(0, 600));
+
+    const entries = await fetchProductsByIds(batch.map(it => it.uniqueID || it.id));
+    if (!entries) {
+      stats.failed++;
+      if (++consecutiveFails >= PROMO_MAX_FAILURES) {
+        console.warn(`[${STORE_NAME}] Promo pass stopped after ${consecutiveFails} failed requests in a row — resumes next scan.`);
+        break;
+      }
+      continue;
+    }
+    consecutiveFails = 0;
+    stats.batches++;
+
+    for (const item of batch) {
+      const entry = entries.get(String(item.uniqueID || item.id));
+      const texts = extractPromoTexts(entry);
+      if (!texts) continue;   // no sKU data — leave the product's promo state alone
+      stats.checked++;
+
+      const st = evaluatePromos(item, texts);
+      if (item.promoChecked == null || run.coldStart) {
+        setPromoState(item, st);
+        stats.seeded++;
+      } else if (isNewPromo(item, st)) {
+        const sig    = `${st.price != null ? st.price : ''}|${st.text}`;
+        const recent = item.promoPostedSig === sig && Date.now() - (item.promoPostedAt || 0) < PROMO_REPOST_DAYS * 86400000;
+        if (recent) setPromoState(item, st);
+        else { candidates.push({ item, st, sig, entry }); item.promoChecked = Date.now(); }
+      } else {
+        setPromoState(item, st);
+      }
+    }
+    saveCache(cache);
+  }
+
+  candidates.sort((a, b) => (b.st.pct || 0) - (a.st.pct || 0));
+  for (const c of candidates) {
+    if (stats.posted >= MAX_PROMO_POSTS) { stats.capped++; continue; }
+    setPromoState(c.item, c.st);
+    c.item.promoPostedSig = c.sig;
+    c.item.promoPostedAt  = Date.now();
+    applyDetailLinks(c.item, c.entry);
+    await postToDiscord(c.item, 'promo');
+    stats.posted++;
+    stats.postedBy[c.item.collection] = (stats.postedBy[c.item.collection] || 0) + 1;
+  }
+  saveCache(cache);
+
+  console.log(`[${STORE_NAME}] Promotions: ${stats.batches} requests, ${stats.checked} products checked, ${stats.seeded} recorded for the first time, ${stats.posted} posted${stats.capped ? `, ${stats.capped} over the cap (retried later)` : ''}${stats.failed ? `, ${stats.failed} failed requests` : ''}`);
+  return stats;
+}
+
 // ===== MAIN SCAN =====
 async function scan() {
   const cache       = loadCache();
@@ -546,6 +793,23 @@ async function scan() {
     for (const result of await scrapeRotating(run)) addResult(result.label, result);
   } catch (err) {
     console.error(`[${STORE_NAME}] Error on rotating categories:`, err.message);
+  }
+
+  // Promotions run last and are fenced off: whatever goes wrong here, the price scan above
+  // has already done its work and still reports.
+  if (PROMOS_ENABLED && corePages > 0) {
+    try {
+      const promo = await scanPromotions(run);
+      totPriceDrops += promo.posted;
+      for (const [label, n] of Object.entries(promo.postedBy)) {
+        const row = categorySummary.find(c => c.label === label);
+        if (row) row.drops = (row.drops || 0) + n;
+      }
+    } catch (err) {
+      console.error(`[${STORE_NAME}] Promotion pass failed (price scan unaffected):`, err.message);
+    }
+  } else if (!PROMOS_ENABLED) {
+    console.log(`[${STORE_NAME}] Promotion pass disabled (BOOTS_PROMOS=0).`);
   }
 
   // Mark OOS — core categories only. Rotating items are seen every few scans by design,
@@ -656,7 +920,7 @@ module.exports = {
   config: { name: STORE_NAME },
   scan,
   exportCSV,
-  _test: { processProduct, handleItems, newTally },
+  _test: { processProduct, handleItems, newTally, parsePromo, evaluatePromos, extractPromoTexts, isNewPromo, withPromoPricing, makeEmbed },
 };
 
 // --- Discord field-limit guard (added 2026-10-02) ---------------------------
