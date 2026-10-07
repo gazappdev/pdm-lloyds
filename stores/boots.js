@@ -7,22 +7,50 @@ const path = require('path');
 const STORE_NAME = 'Boots';
 const ORIGIN     = 'https://www.boots.com';
 const STORE_ID   = '11352';
-const PAGE_SIZE  = 24;
+// The WCS API serves up to 200 per page; 100 keeps responses ~1.5MB and cuts the
+// request count roughly fourfold against the old 24 (verified 2026-10-07).
+const PAGE_SIZE  = 100;
 
 // Numeric category IDs — text identifiers are blocked by Incapsula; numeric IDs bypass it.
 // To add more categories: run node scripts/test-boots.js (TEST_BOOTS=1 on Bisect) and drill the tree.
+// postNew: a product first appearing here is posted as a new deal even without a was-price.
+// The Boots feed carries one selling price and almost never a was-price, so membership of an
+// offer category is the only "on offer" signal there is. Hair is the full department, not an
+// offer list, so it stays price-drop only and is scanned last.
 const CATEGORIES = [
-  { id: '2608697', label: 'Skincare Savings' },
-  { id: '1595059', label: 'Toiletries Offers' },
-  { id: '1595046', label: 'Fragrance Offers' },
-  { id: '1595111', label: 'Electrical Offers' },
-  { id: '1595040', label: 'Hair' },
-  { id: '1595033', label: 'Health Offers' },
-  { id: '1595042', label: 'Skincare Offers' },
-  { id: '1595072', label: 'Opticians Offers' },
-  { id: '2921187', label: 'Makeup Offers' },
-  { id: '1595110', label: 'Baby & Child Offers' },
+  { id: '2608697', label: 'Skincare Savings',      postNew: true },
+  { id: '1595059', label: 'Toiletries Offers',     postNew: true },
+  { id: '1595046', label: 'Fragrance Offers',      postNew: true },
+  { id: '1595111', label: 'Electrical Offers',     postNew: true },
+  { id: '1595033', label: 'Health Offers',         postNew: true },
+  { id: '1595042', label: 'Skincare Offers',       postNew: true },
+  { id: '1595072', label: 'Opticians Offers',      postNew: true },
+  { id: '2921187', label: 'Makeup Offers',         postNew: true },
+  { id: '1595110', label: 'Baby & Child Offers',   postNew: true },
+  { id: '1595224', label: 'Sale',                  postNew: true },
+  { id: '1923680', label: 'Clearance',             postNew: true },
+  { id: '2583681', label: '£10 Tuesday',           postNew: true },
+  { id: '1891719', label: 'Value Packs & Bundles', postNew: true },
+  { id: '1595040', label: 'Hair',                  postNew: false },
 ];
+
+// Large event categories (~4,900 products each). Scanning them whole every run would more
+// than double the request volume, so each scan walks ROTATING_PAGES_PER_SCAN pages and the
+// next scan resumes where this one stopped (cursor persisted in the cache file). At 35 pages
+// of 100 the full ~100 pages are covered roughly every 3 scans.
+const ROTATING_CATEGORIES = [
+  { id: '3505684', label: 'Super Savings Event',   postNew: true },
+  { id: '2407680', label: 'Premium Beauty Offers', postNew: true },
+];
+const ROTATING_PAGES_PER_SCAN = parseInt(process.env.BOOTS_ROTATING_PAGES || '35', 10);
+
+// Categories the bot scanned before per-category seeding existed. An existing cache with no
+// `seeded` map is treated as already seeded for these so the upgrade posts nothing spurious.
+const LEGACY_SEEDED = ['2608697', '1595059', '1595046', '1595111', '1595040', '1595033', '1595042', '1595072', '2921187', '1595110'];
+
+// Ceiling on new-deal posts per scan. An event switch can move hundreds of products into an
+// offer category at once; anything over the cap is cached silently and logged.
+const MAX_NEW_POSTS_PER_SCAN = parseInt(process.env.BOOTS_MAX_NEW_POSTS || '40', 10);
 
 const EMBED_COLOR = 0x003DA5; // Boots blue (Pantone 286C)
 const CACHE_FILE  = path.resolve(__dirname, '..', 'last_seen_boots.json');
@@ -98,7 +126,7 @@ async function fetchProductDetail(uniqueID) {
 }
 
 // ===== PRODUCT PARSER =====
-function parseProduct(raw, categoryLabel) {
+function parseProduct(raw, categoryLabel, source) {
   if (!raw || !raw.uniqueID) return null;
 
   const id   = String(raw.uniqueID);
@@ -138,7 +166,7 @@ function parseProduct(raw, categoryLabel) {
     imageUrl:    '',   // enriched before Discord post
     productUrl:  '',   // enriched before Discord post
     inStock:     raw.buyable === 'true',
-    source:      'boots-category',
+    source:      source || 'boots-category',
     collection:  categoryLabel,
   };
 }
@@ -165,28 +193,30 @@ async function enrichProduct(product) {
 }
 
 // ===== CHANGE DETECTION =====
-function processProduct(p, cache, seenThisRun) {
+function processProduct(p, cache, seenThisRun, postNew) {
+  // Categories overlap heavily; the first sighting in a run is the one that counts.
+  if (seenThisRun.has(p.id)) return { type: null };
   seenThisRun.add(p.id);
   const prev = cache.items[p.id];
 
   if (!prev) {
     cache.items[p.id] = { ...p, status: 'active' };
-    return p.wasPrice != null
+    return (p.wasPrice != null || postNew)
       ? { type: 'new', product: cache.items[p.id] }
       : { type: null };
   }
 
-  if (prev.status === 'oos') {
+  const prevPrice = prev.price;
+  const dropped   = prevPrice != null && p.price < prevPrice - 0.005;
+
+  // Back after dropping out of the scanned categories. Offers rotate, so a product that
+  // returns cheaper than when it was last seen is a price drop, not a silent restock.
+  if (prev.status === 'oos' && !dropped) {
     cache.items[p.id] = { ...prev, ...p, ean: prev.ean || p.ean, status: 'active' };
     return { type: 'restock', product: cache.items[p.id] };
   }
 
-  cache.items[p.id].name    = p.name;
-  cache.items[p.id].brand   = p.brand;
-  cache.items[p.id].inStock = p.inStock;
-
-  const prevPrice = prev.price;
-  if (prevPrice != null && p.price < prevPrice - 0.005) {
+  if (dropped) {
     const newPct = Math.round((1 - p.price / prevPrice) * 100);
     cache.items[p.id] = {
       ...prev,
@@ -195,11 +225,18 @@ function processProduct(p, cache, seenThisRun) {
       discountPct: newPct,
       name:        p.name,
       brand:       p.brand,
+      inStock:     p.inStock,
+      source:      p.source,
+      collection:  p.collection,
       status:      'active',
     };
     return { type: 'priceDrop', product: cache.items[p.id] };
   }
 
+  cache.items[p.id].name        = p.name;
+  cache.items[p.id].brand       = p.brand;
+  cache.items[p.id].inStock     = p.inStock;
+  cache.items[p.id].source      = p.source;
   cache.items[p.id].price       = p.price;
   cache.items[p.id].wasPrice    = p.wasPrice;
   cache.items[p.id].discountPct = p.discountPct;
@@ -328,9 +365,55 @@ async function postToDiscord(p, type) {
 }
 
 // ===== CATEGORY SCRAPER =====
-async function scrapeCategory(cat, cache, seenThisRun, coldStart, coldStartBudget) {
+// Runs change detection over one page of parsed products and posts what qualifies.
+// `run` carries the per-scan state shared by every category: cache, seenThisRun, coldStart,
+// coldStartBudget and newPostsLeft. `seeded` is false until the category has been walked
+// once in full; until then its new arrivals are cached silently (price drops still post).
+async function handleItems(items, cat, seeded, run, tally) {
+  for (const p of items) {
+    const detection = processProduct(p, run.cache, run.seenThisRun, cat.postNew);
+    if (detection.type === 'priceDrop') tally.totPriceDrops++;
+    if (detection.type === 'restock')   tally.totRestocks++;
+
+    let shouldPost = false;
+    if (detection.type === 'priceDrop') {
+      shouldPost = !run.coldStart;
+    } else if (detection.type === 'new') {
+      if (run.coldStart) {
+        tally.totNew++;
+        shouldPost = detection.product.wasPrice != null && run.coldStartBudget.remaining > 0;
+      } else if (!seeded) {
+        tally.silentNew++;
+      } else if (run.newPostsLeft <= 0) {
+        tally.cappedNew++;
+      } else {
+        run.newPostsLeft--;
+        tally.totNew++;
+        shouldPost = true;
+      }
+    }
+
+    if (shouldPost) {
+      await enrichProduct(detection.product);
+      // Persist enriched URLs to cache
+      if (run.cache.items[detection.product.id]) {
+        run.cache.items[detection.product.id].productUrl = detection.product.productUrl;
+        run.cache.items[detection.product.id].imageUrl   = detection.product.imageUrl;
+      }
+      await postToDiscord(detection.product, detection.type);
+      if (run.coldStart) run.coldStartBudget.remaining--;
+    }
+  }
+}
+
+const newTally = () => ({ totNew: 0, totPriceDrops: 0, totRestocks: 0, silentNew: 0, cappedNew: 0 });
+
+async function scrapeCategory(cat, run) {
   const { id, label } = cat;
-  let totNew = 0, totPriceDrops = 0, totRestocks = 0, pagesScraped = 0, totSeen = 0;
+  const { cache, coldStart, coldStartBudget } = run;
+  const seeded = !!cache.seeded[id];
+  const tally  = newTally();
+  let pagesScraped = 0, totSeen = 0, complete = false;
   let totalPages = 1;
 
   for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
@@ -340,14 +423,14 @@ async function scrapeCategory(cat, cache, seenThisRun, coldStart, coldStartBudge
     if (!result) {
       if (pageNum === 1) {
         console.warn(`[${STORE_NAME}] No response for ${label}`);
-        return { totNew, totPriceDrops, pagesScraped, seen: 0, error: true };
+        return { ...tally, pagesScraped, seen: 0, error: true };
       }
       break;
     }
 
     if (pageNum === 1) {
       totalPages = Math.ceil(result.total / PAGE_SIZE);
-      console.log(`\n[${STORE_NAME}] ${label}: ${result.total} products, ${totalPages} pages${coldStart ? ` (cold start — ${coldStartBudget.remaining} preview posts remaining)` : ''}`);
+      console.log(`\n[${STORE_NAME}] ${label}: ${result.total} products, ${totalPages} pages${coldStart ? ` (cold start — ${coldStartBudget.remaining} preview posts remaining)` : ''}${!coldStart && !seeded ? ' (first full scan — new arrivals cached silently)' : ''}`);
     }
 
     const items = result.products.map(r => parseProduct(r, label)).filter(Boolean);
@@ -355,31 +438,62 @@ async function scrapeCategory(cat, cache, seenThisRun, coldStart, coldStartBudge
     pagesScraped++;
     console.log(`  [${STORE_NAME}] Page ${pageNum}: ${items.length} products`);
 
-    for (const p of items) {
-      const detection = processProduct(p, cache, seenThisRun);
-      if (detection.type === 'new')       totNew++;
-      if (detection.type === 'priceDrop') totPriceDrops++;
-      if (detection.type === 'restock')   totRestocks++;
+    await handleItems(items, cat, seeded, run, tally);
+    if (pageNum >= totalPages) complete = true;
+    saveCache(cache);
+  }
 
-      const shouldPost = !coldStart
-        ? (detection.type === 'new' || detection.type === 'priceDrop')
-        : (detection.type === 'new' && coldStartBudget.remaining > 0);
+  if (complete && !seeded) { cache.seeded[id] = true; saveCache(cache); }
+  if (tally.silentNew) console.log(`  [${STORE_NAME}] ${label}: ${tally.silentNew} new arrivals cached silently (seeding)`);
+  if (tally.cappedNew) console.log(`  [${STORE_NAME}] ${label}: ${tally.cappedNew} new arrivals over the per-scan cap, cached silently`);
 
-      if (shouldPost) {
-        await enrichProduct(detection.product);
-        // Persist enriched URLs to cache
-        if (cache.items[detection.product.id]) {
-          cache.items[detection.product.id].productUrl = detection.product.productUrl;
-          cache.items[detection.product.id].imageUrl   = detection.product.imageUrl;
-        }
-        await postToDiscord(detection.product, detection.type);
-        if (coldStart) coldStartBudget.remaining--;
-      }
+  return { ...tally, pagesScraped, seen: totSeen };
+}
+
+// Walks up to ROTATING_PAGES_PER_SCAN pages of the rotating categories, resuming from the
+// cursor the previous scan left in the cache. A failed page leaves the cursor where it is.
+async function scrapeRotating(run) {
+  const { cache } = run;
+  const summary = new Map();
+  let pagesLeft = ROTATING_PAGES_PER_SCAN, catsCompleted = 0, first = true;
+
+  if (!cache.rotation || !ROTATING_CATEGORIES[cache.rotation.cat]) cache.rotation = { cat: 0, page: 1 };
+
+  while (pagesLeft > 0 && catsCompleted < ROTATING_CATEGORIES.length) {
+    const cur = cache.rotation;
+    const cat = ROTATING_CATEGORIES[cur.cat];
+    if (!summary.has(cat.id)) summary.set(cat.id, { label: cat.label, ...newTally(), pagesScraped: 0, seen: 0 });
+    const entry = summary.get(cat.id);
+
+    if (!first) await sleep(600 + randInt(0, 400));
+    first = false;
+
+    const result = await fetchCategoryPage(cat.id, cur.page);
+    if (!result) { entry.error = true; break; }
+    pagesLeft--;
+
+    const totalPages = Math.ceil(result.total / PAGE_SIZE);
+    const items = result.products.map(r => parseProduct(r, cat.label, 'boots-rotating')).filter(Boolean);
+    entry.pagesScraped++;
+    entry.seen += items.length;
+    console.log(`  [${STORE_NAME}] ${cat.label} (rotating) page ${cur.page}/${totalPages}: ${items.length} products`);
+
+    await handleItems(items, cat, !!cache.seeded[cat.id], run, entry);
+
+    if (cur.page >= totalPages) {
+      // Reaching the end means every page has been walked since the cursor last sat at 1.
+      cache.seeded[cat.id] = true;
+      cache.rotation = { cat: (cur.cat + 1) % ROTATING_CATEGORIES.length, page: 1 };
+      catsCompleted++;
+    } else {
+      cache.rotation = { cat: cur.cat, page: cur.page + 1 };
     }
     saveCache(cache);
   }
 
-  return { totNew, totPriceDrops, totRestocks, pagesScraped, seen: totSeen };
+  const next = ROTATING_CATEGORIES[cache.rotation.cat];
+  console.log(`[${STORE_NAME}] Rotating scan paused — next run resumes at ${next.label} page ${cache.rotation.page}`);
+  return [...summary.values()];
 }
 
 // ===== MAIN SCAN =====
@@ -387,27 +501,25 @@ async function scan() {
   const cache       = loadCache();
   const coldStart   = Object.keys(cache.items).length === 0;
   const seenThisRun = new Set();
-  let totNew = 0, totPriceDrops = 0, totRestocks = 0, totPages = 0;
+  let totNew = 0, totPriceDrops = 0, totRestocks = 0, totPages = 0, corePages = 0;
   const categorySummary  = [];
   const coldStartBudget  = { remaining: COLD_START_PREVIEW_COUNT };
 
+  if (!cache.seeded || typeof cache.seeded !== 'object') {
+    cache.seeded = {};
+    if (!coldStart) for (const id of LEGACY_SEEDED) cache.seeded[id] = true;
+  }
+  const run = { cache, seenThisRun, coldStart, coldStartBudget, newPostsLeft: MAX_NEW_POSTS_PER_SCAN };
+
   if (coldStart) console.log(`[${STORE_NAME}] Cold start — posting first ${COLD_START_PREVIEW_COUNT} deals for verification, caching rest silently.`);
 
-  for (const cat of CATEGORIES) {
-    let result;
-    try {
-      result = await scrapeCategory(cat, cache, seenThisRun, coldStart, coldStartBudget);
-    } catch (err) {
-      console.error(`[${STORE_NAME}] Error on ${cat.label}:`, err.message);
-      categorySummary.push({ label: cat.label, new: 0, drops: 0, pages: 0, error: true });
-      continue;
-    }
+  const addResult = (label, result) => {
     totNew        += result.totNew;
     totPriceDrops += result.totPriceDrops;
     totRestocks   += result.totRestocks || 0;
     totPages      += result.pagesScraped;
     categorySummary.push({
-      label:    cat.label,
+      label,
       new:      result.totNew,
       drops:    result.totPriceDrops,
       restocks: result.totRestocks || 0,
@@ -415,11 +527,31 @@ async function scan() {
       seen:     result.seen,
       error:    result.error || false,
     });
+  };
+
+  for (const cat of CATEGORIES) {
+    let result;
+    try {
+      result = await scrapeCategory(cat, run);
+    } catch (err) {
+      console.error(`[${STORE_NAME}] Error on ${cat.label}:`, err.message);
+      categorySummary.push({ label: cat.label, new: 0, drops: 0, pages: 0, error: true });
+      continue;
+    }
+    corePages += result.pagesScraped;
+    addResult(cat.label, result);
   }
 
-  // Mark OOS
+  try {
+    for (const result of await scrapeRotating(run)) addResult(result.label, result);
+  } catch (err) {
+    console.error(`[${STORE_NAME}] Error on rotating categories:`, err.message);
+  }
+
+  // Mark OOS — core categories only. Rotating items are seen every few scans by design,
+  // so absence from one run says nothing about them.
   let totOos = 0;
-  if (totPages > 0) {
+  if (corePages > 0) {
     for (const id of Object.keys(cache.items)) {
       const it = cache.items[id];
       if (!it || it.source !== 'boots-category') continue;
@@ -485,7 +617,7 @@ async function exportCSV(scrapesheetWebhook, scrapesheetWebhook2) {
   ];
   const rows = [headers.map(csvEscape).join(',')];
 
-  for (const item of Object.values(cache.items).filter(it => it.source === 'boots-category')) {
+  for (const item of Object.values(cache.items).filter(it => it.source === 'boots-category' || it.source === 'boots-rotating')) {
     const enc = encodeURIComponent(capSearchQuery(item.ean || item.name || ''));
     rows.push([
       item.imageUrl   ? `=IMAGE("${item.imageUrl}")` : '',
@@ -524,6 +656,7 @@ module.exports = {
   config: { name: STORE_NAME },
   scan,
   exportCSV,
+  _test: { processProduct, handleItems, newTally },
 };
 
 // --- Discord field-limit guard (added 2026-10-02) ---------------------------
