@@ -73,7 +73,10 @@ async function postStoreSummary(stats, scanDurStr, delayMins, nextTimeFull) {
   const totalCats  = (stats.categorySummary || []).length;
   const activeCats = (stats.categorySummary || []).filter(c => c.error || c.new || c.drops || c.restocks);
   let catLines = '';
-  if (activeCats.length > 0) {
+  if (stats.blocked) {
+    // One line instead of an ⚠️ error per category: the store refused the whole scan.
+    catLines = `🚫 **${stats.storeName} ${stats.blocked}.** Scan stopped early; cache untouched, nothing marked OOS.`;
+  } else if (activeCats.length > 0) {
     catLines = activeCats.map(c => {
       if (c.error) return '`' + c.label + '` ⚠️ error';
       const parts = [];
@@ -167,7 +170,8 @@ async function runLoop() {
       await postStoreSummary(stats, durStr, delayMins, nextTimeFull);
 
       if (stats.uniqueSeen === 0 || stats.pagesScraped === 0) {
-        const reason = stats.pagesScraped === 0 ? 'could not reach the site (0 pages scraped)' : 'scraped pages but found 0 products (parser may be broken)';
+        const reason = stats.blocked ? stats.blocked
+          : stats.pagesScraped === 0 ? 'could not reach the site (0 pages scraped)' : 'scraped pages but found 0 products (parser may be broken)';
         await sendMonitor(`⚠️ <@${ALERT_USER_ID}> **${stats.storeName}** scan alert — ${reason}.`);
       }
     }

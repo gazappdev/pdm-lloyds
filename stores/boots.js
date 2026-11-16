@@ -109,6 +109,18 @@ const sleep   = ms => new Promise(r => setTimeout(r, ms));
 const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 
 // ===== API FETCHERS =====
+// Boots sits behind Imperva/Incapsula. When it decides a client is a bot it answers the JSON
+// feed with HTTP 200 and an HTML "Pardon Our Interruption" challenge page (seen 2026-11-16,
+// from both Bisect and a home connection). Detect that explicitly so the scan reports
+// "blocked" instead of a generic per-category error.
+const BLOCKED_REASON = 'blocked by Boots bot protection (Imperva "Pardon Our Interruption" page)';
+
+function isBotWall(res, text) {
+  const ct = res.headers.get('content-type') || '';
+  if (ct.includes('json')) return false;
+  return /Pardon Our Interruption|incapsula|_Incapsula_Resource/i.test(text) || /^\s*</.test(text);
+}
+
 async function fetchCategoryPage(categoryId, pageNum) {
   const url = `${ORIGIN}/search/resources/store/${STORE_ID}/productview/byCategory/${categoryId}?pageSize=${PAGE_SIZE}&pageNumber=${pageNum}&lang=-1`;
   try {
@@ -117,7 +129,12 @@ async function fetchCategoryPage(categoryId, pageNum) {
       console.warn(`[${STORE_NAME}] Category ${categoryId} p${pageNum}: HTTP ${res.status}`);
       return null;
     }
-    const data = await res.json();
+    const text = await res.text();
+    if (isBotWall(res, text)) {
+      console.warn(`[${STORE_NAME}] Category ${categoryId} p${pageNum}: ${BLOCKED_REASON}`);
+      return { blocked: true };
+    }
+    const data = JSON.parse(text);
     return {
       products: data.catalogEntryView || [],
       total:    parseInt(data.recordSetTotal || data.recordSetTotalMatches || '0', 10),
@@ -594,6 +611,9 @@ async function scrapeCategory(cat, run) {
     if (pageNum > 1) await sleep(600 + randInt(0, 400));
 
     const result = await fetchCategoryPage(id, pageNum);
+    if (result && result.blocked) {
+      return { ...tally, pagesScraped, seen: totSeen, error: true, blocked: true };
+    }
     if (!result) {
       if (pageNum === 1) {
         console.warn(`[${STORE_NAME}] No response for ${label}`);
@@ -643,6 +663,7 @@ async function scrapeRotating(run) {
     first = false;
 
     const result = await fetchCategoryPage(cat.id, cur.page);
+    if (result && result.blocked) { entry.error = true; run.blocked = true; break; }
     if (!result) { entry.error = true; break; }
     pagesLeft--;
 
@@ -787,17 +808,23 @@ async function scan() {
     }
     corePages += result.pagesScraped;
     addResult(cat.label, result);
+    // Once the bot wall is up every further request gets the same page, so stop asking.
+    if (result.blocked) { run.blocked = true; break; }
   }
 
-  try {
-    for (const result of await scrapeRotating(run)) addResult(result.label, result);
-  } catch (err) {
-    console.error(`[${STORE_NAME}] Error on rotating categories:`, err.message);
+  if (!run.blocked) {
+    try {
+      for (const result of await scrapeRotating(run)) addResult(result.label, result);
+    } catch (err) {
+      console.error(`[${STORE_NAME}] Error on rotating categories:`, err.message);
+    }
   }
+
+  if (run.blocked) console.warn(`[${STORE_NAME}] Scan stopped early: ${BLOCKED_REASON}. Promotions and OOS marking skipped.`);
 
   // Promotions run last and are fenced off: whatever goes wrong here, the price scan above
   // has already done its work and still reports.
-  if (PROMOS_ENABLED && corePages > 0) {
+  if (PROMOS_ENABLED && corePages > 0 && !run.blocked) {
     try {
       const promo = await scanPromotions(run);
       totPriceDrops += promo.posted;
@@ -813,9 +840,10 @@ async function scan() {
   }
 
   // Mark OOS — core categories only. Rotating items are seen every few scans by design,
-  // so absence from one run says nothing about them.
+  // so absence from one run says nothing about them. A scan cut short by the bot wall has
+  // not seen every category, so it must not mark the unseen ones out of stock.
   let totOos = 0;
-  if (corePages > 0) {
+  if (corePages > 0 && !run.blocked) {
     for (const id of Object.keys(cache.items)) {
       const it = cache.items[id];
       if (!it || it.source !== 'boots-category') continue;
@@ -846,6 +874,7 @@ async function scan() {
     coldStartPreviewSent: coldStart ? COLD_START_PREVIEW_COUNT - coldStartBudget.remaining : 0,
     categorySummary,
     totalCached,
+    blocked:     run.blocked ? BLOCKED_REASON : null,
     newCats:     [],
     missingCats: [],
   };
