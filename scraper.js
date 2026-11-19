@@ -169,6 +169,10 @@ async function runLoop() {
       const durStr    = `${Math.floor(storeSecs / 60)}m ${storeSecs % 60}s`;
       await postStoreSummary(stats, durStr, delayMins, nextTimeFull);
 
+      // Boots is behind an Imperva bot wall (2026-11-16) and fails most runs; Gary asked for
+      // no @-tag alert for it. Its run summary card still shows the 🚫 blocked line.
+      if (stats.storeName === 'Boots') continue;
+
       if (stats.uniqueSeen === 0 || stats.pagesScraped === 0) {
         const reason = stats.blocked ? stats.blocked
           : stats.pagesScraped === 0 ? 'could not reach the site (0 pages scraped)' : 'scraped pages but found 0 products (parser may be broken)';
